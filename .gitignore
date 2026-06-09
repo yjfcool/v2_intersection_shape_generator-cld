@@ -1,0 +1,15 @@
+/.idea/
+node_modules
+*.bak
+*.gpt
+*.cld
+*.project
+*.classpath
+.settings/
+.vscode/
+.claude/
+build/
+cmake-build-debug/
+depends/
+depends.bak/
+src/others/

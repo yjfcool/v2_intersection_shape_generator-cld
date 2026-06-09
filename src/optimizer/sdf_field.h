@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include <unordered_map>
 
 class SDFField {
 public:
@@ -17,6 +18,10 @@ public:
     Vec2d cellToWorld(int r, int c) const;
     bool valid() const { return !grid_.empty(); }
 
+    // Static cache for SDF field reuse
+    static void clearCache();
+    static size_t getCacheSize();
+
 private:
     void rebuildGrid(const std::vector<Polygon2d>&);
     double distToPolygons(const Vec2d&, const std::vector<Polygon2d>&) const;
@@ -26,10 +31,27 @@ private:
     inline int idx(int r, int c) const { return r * cols_ + c; }
     double rawAt(int r, int c) const;
 
+    // Cache-related methods and data
+    struct CacheKey {
+        BoundingBox2d roi;
+        std::vector<Obstacle> obstacles;
+        double cell_size;
+        double buffer;
+
+        bool operator==(const CacheKey& other) const;
+    };
+
+    struct CacheKeyHash {
+        std::size_t operator()(const SDFField::CacheKey& k) const;
+    };
+
+    void buildInternal(const BoundingBox2d& roi, const std::vector<Obstacle>& obs, double cs, double buf);
+
 private:
     double cs_ = 0.2;
     BoundingBox2d roi_;
     int rows_ = 0, cols_ = 0;
     std::vector<double> grid_;
     std::vector<Polygon2d> buffered_;
+    static std::unordered_map<CacheKey, std::vector<double>, CacheKeyHash> cache_map_; // Static cache storage
 };

@@ -93,7 +93,8 @@ double BezierSegment::maxCurvature(int samples) const {
 
 // 固定数量采样
 std::vector<Vec2d> BezierSegment::sampleCount(int n) const {
-    std::vector<Vec2d> pts(n + 1); //pts.reserve(n+1);
+    std::vector<Vec2d> pts;
+    pts.reserve(n + 1);
     for (int i = 0; i <= n; ++i)
         pts.push_back(evaluate(i * 1.0 / n));
     return pts;

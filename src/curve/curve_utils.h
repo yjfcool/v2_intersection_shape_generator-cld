@@ -6,6 +6,10 @@ Vec2d circumcenter(const Vec2d& a, const Vec2d& b, const Vec2d& c);
 std::vector<Vec2d> elasticBandSmooth(const std::vector<Vec2d>&, const SDFField&,
                                      const Polygon2d&, double kappa_max = 0.25, double move_step = 0.03,
                                      int max_iter = 50, double min_sdf = 0.1);
+std::vector<Vec2d> elasticBandSmoothAdaptive(const std::vector<Vec2d>&, const SDFField&,
+                                     const Polygon2d&, double kappa_max = 0.25, double move_step = 0.03,
+                                     int max_iter = 50, double min_sdf = 0.1);
+std::vector<Vec2d> downsamplePoints(const std::vector<Vec2d>&, int target_count);
 BezierCurve rebuildFromSmoothedPts(const std::vector<Vec2d>&, const Vec2d&, const Vec2d&);
 std::vector<Vec2d> midlineSampleByArcLength(const BezierCurve&, const BezierCurve&, int n = 20);
 double signedDistToLine(const Vec2d& pt, const Vec2d& p0, const Vec2d& p1);

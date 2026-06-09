@@ -38,13 +38,13 @@ class SDFField;
 // ─────────────────────────────────────────────────────────────────────────────
 class ClusterOrderSolver {
 public:
-    void build(const std::vector<Connectivity> &, const std::vector<Lane> &, const std::vector<LaneGroup> &);
+    void build(const std::vector<Connectivity>&, const std::vector<Lane>&, const std::vector<LaneGroup>&);
 
-    void markObstacleExempt(CurvePair &, const Vec2d &, const SDFField &, double r = 1.5);
+    void markObstacleExempt(CurvePair&, const Vec2d&, const SDFField&, double r = 1.5);
 
-    const std::vector<CurvePair> &pairs() const { return pairs_; }
+    const std::vector<CurvePair>& pairs() const { return pairs_; }
 
-    CrossExemption exemptionOf(const ConnId &, const ConnId &) const;
+    CrossExemption exemptionOf(const ConnId&, const ConnId&) const;
 
     bool pairExists(const ConnId& a, const ConnId& b) const;
 
@@ -52,7 +52,7 @@ public:
 
     Vec2d refPerpOf(const ConnId &, const ConnId &) const;
 
-    void checkAndMarkA2(const std::unordered_map<ConnId, BezierCurve> &, const SDFField &, double r = 1.5);
+    void checkAndMarkA2(const std::unordered_map<ConnId, BezierCurve>&, const SDFField&, double r = 1.5);
 
     const std::unordered_map<LaneGroupId, std::vector<ConnId>>& entryGroupOrder() const {
         return entry_group_order_;
@@ -75,11 +75,16 @@ private:
     std::unordered_map<LaneGroupId, std::vector<ConnId>> entry_group_order_;
     std::unordered_map<LaneGroupId, std::vector<ConnId>> exit_group_order_;
 
+    std::unordered_map<ConnId, bool> is_uturn_;
+    std::unordered_map<ConnId, double> exit_lat_sign_;
+    std::unordered_map<ConnId, double> entry_lat_in_entry_ref_;
+
     // Lateral positions used by topological inversion detector
     // entry_cluster: exit_lat_in_entry_ref[cid] = exit_pt projected onto entry arm perp
     // exit_cluster:  entry_lat_in_exit_ref[cid]  = entry_pt projected onto exit arm left-normal
     std::unordered_map<ConnId, double> exit_lat_in_entry_ref_;
     std::unordered_map<ConnId, double> entry_lat_in_exit_ref_;
+    std::unordered_map<ConnId, double> exit_lat_in_exit_group_ref_;
     // Cluster ranks (lower index = more LEFT)
     std::unordered_map<ConnId, int> entry_cluster_rank_;
     std::unordered_map<ConnId, int> exit_cluster_rank_;

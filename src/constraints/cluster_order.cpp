@@ -1,6 +1,7 @@
 #include "cluster_order.h"
 #include "optimizer/sdf_field.h"
 #include "curve/curve_utils.h"
+#include "utils.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -91,22 +92,20 @@ static Vec2d pairRefPerp(const Connectivity &ca, const Connectivity &cb,
 
 // ─── Sort key computations ────────────────────────────────────────────────────
 // Entry cluster: angle of exit_pt relative to mean_entry_pt (DESCENDING = CCW first = LEFT)
-static double entryAngle(const Connectivity &c, const Vec2d &me,
-                         const std::vector<Lane> &lanes) {
+static double entryAngle(const Connectivity &c, const Vec2d &me, const std::vector<Lane> &lanes) {
     Vec2d diff = exitEndpoint(findLane(lanes, c.exit_lane_id)) - me;
     return std::atan2(diff[1], diff[0]);
 }
 
 // Exit cluster: projection of entry_pt onto exit arm left-normal (DESCENDING = LEFT first)
-static double exitEntryLat(const Connectivity &c, const Vec2d &ealn,
-                           const std::vector<Lane> &lanes) {
+static double exitEntryLat(const Connectivity &c, const Vec2d &ealn, const std::vector<Lane> &lanes) {
     return entryEndpoint(findLane(lanes, c.entry_lane_id)).dot(ealn);
 }
 
 // ─── Pair management ─────────────────────────────────────────────────────────
 bool ClusterOrderSolver::hasPair(
-    const std::vector<CurvePair> &pairs, const ConnId &a, const ConnId &b) {
-    for (auto &p:pairs)
+    const std::vector<CurvePair>& pairs, const ConnId& a, const ConnId& b) {
+    for (auto& p : pairs)
         if ((p.id_a == a && p.id_b == b) || (p.id_a == b && p.id_b == a))
             return true;
     return false;
@@ -125,9 +124,13 @@ void ClusterOrderSolver::addPairsFromSortedCluster(
             CurvePair p;
             p.id_a = sorted_ids[i];
             p.id_b = sorted_ids[j];
-            p.exempt = CrossExemption::None;
             p.expected_side = +1;           // sorted[i] is LEFT of sorted[j]
             p.ref_perp = pairRefPerp(*ca, *cb, lanes);
+            if (!ca->exit_lane_id.empty() && ca->exit_lane_id == cb->exit_lane_id) {
+                p.exempt = CrossExemption::StructuralCross;
+            } else {
+                p.exempt = CrossExemption::None;
+            }
             pairs_.push_back(p);
         }
     }
@@ -148,6 +151,7 @@ void ClusterOrderSolver::addPairsFromSortedCluster(
 void ClusterOrderSolver::detectTopologicalInversions(
         const std::vector<Connectivity> &conns) {
     constexpr double LAT_EPS = 0.3; // m — ignore near-equal laterals
+    constexpr double OPP_SIDE_THRESH = 3.0;  // m — minimum lat magnitude for opposite-side check
 
     for (auto &pair:pairs_) {
         if (pair.exempt != CrossExemption::None)continue;
@@ -158,30 +162,107 @@ void ClusterOrderSolver::detectTopologicalInversions(
         bool same_entry = (ca->enterGroupId == cb->enterGroupId);
         bool same_exit = (ca->exitGroupId == cb->exitGroupId);
 
+        {
+            bool a_ut = is_uturn_.count(pair.id_a) && is_uturn_.at(pair.id_a);
+            bool b_ut = is_uturn_.count(pair.id_b) && is_uturn_.at(pair.id_b);
+            if (a_ut != b_ut) {
+                pair.exempt = CrossExemption::StructuralCross;
+                continue;
+            }
+        }
+
         if (same_entry) {
-            // Entry-cluster pair: rank vs exit_lat
             auto ira = entry_cluster_rank_.find(pair.id_a);
             auto irb = entry_cluster_rank_.find(pair.id_b);
-            auto ixa = exit_lat_in_entry_ref_.find(pair.id_a);
-            auto ixb = exit_lat_in_entry_ref_.find(pair.id_b);
-            if (ira == entry_cluster_rank_.end() || irb == entry_cluster_rank_.end())continue;
-            if (ixa == exit_lat_in_entry_ref_.end() || ixb == exit_lat_in_entry_ref_.end())continue;
-            double rank_diff = (double) (ira->second - irb->second);
-            double lat_diff = ixa->second - ixb->second;
-            if (std::abs(lat_diff) < LAT_EPS)continue;
+            if (ira == entry_cluster_rank_.end() || irb == entry_cluster_rank_.end()) continue;
+            double rank_diff = (double)(ira->second - irb->second);
+
+            // opposite-side exit
+            {
+                auto ixa = exit_lat_sign_.find(pair.id_a);
+                auto ixb = exit_lat_sign_.find(pair.id_b);
+                if (ixa != exit_lat_sign_.end() && ixb != exit_lat_sign_.end()) {
+                    double la = ixa->second, lb = ixb->second;
+                    if (la * lb < 0.0 &&
+                        std::abs(la) > OPP_SIDE_THRESH &&
+                        std::abs(lb) > OPP_SIDE_THRESH) {
+                        pair.exempt = CrossExemption::StructuralCross;
+                        continue;
+                    }
+                }
+            }
+            // entry-exit lateral inversion
+            {
+                auto iea = entry_lat_in_entry_ref_.find(pair.id_a);
+                auto ieb = entry_lat_in_entry_ref_.find(pair.id_b);
+                bool share_exit = (!ca->exitGroupId.empty() &&
+                                   ca->exitGroupId == cb->exitGroupId);
+                if (iea != entry_lat_in_entry_ref_.end() &&
+                    ieb != entry_lat_in_entry_ref_.end()) {
+                    double entry_diff = iea->second - ieb->second;
+                    if (std::abs(entry_diff) > LAT_EPS) {
+                        double exit_diff = 0.0;
+                        bool got_exit = false;
+                        if (share_exit) {
+                            auto ixa = exit_lat_in_exit_group_ref_.find(pair.id_a);
+                            auto ixb = exit_lat_in_exit_group_ref_.find(pair.id_b);
+                            if (ixa != exit_lat_in_exit_group_ref_.end() &&
+                                ixb != exit_lat_in_exit_group_ref_.end()) {
+                                exit_diff = ixa->second - ixb->second;
+                                got_exit = true;
+                            }
+                        } else {
+                            auto ixa = exit_lat_sign_.find(pair.id_a);
+                            auto ixb = exit_lat_sign_.find(pair.id_b);
+                            if (ixa != exit_lat_sign_.end() &&
+                                ixb != exit_lat_sign_.end()) {
+                                exit_diff = ixa->second - ixb->second;
+                                got_exit = true;
+                            }
+                        }
+                        if (got_exit && std::abs(exit_diff) > LAT_EPS) {
+                            if (entry_diff * exit_diff < 0.0) {
+                                pair.exempt = CrossExemption::StructuralCross;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Bug4: same-exit-group pairs — use exit-group lateral ─────────────
+            bool share_exit = (!ca->exitGroupId.empty() && ca->exitGroupId == cb->exitGroupId);
+            double lat_diff;
+            if (share_exit) {
+                auto ixa = exit_lat_in_exit_group_ref_.find(pair.id_a);
+                auto ixb = exit_lat_in_exit_group_ref_.find(pair.id_b);
+                if (ixa == exit_lat_in_exit_group_ref_.end() ||
+                    ixb == exit_lat_in_exit_group_ref_.end()) continue;
+                lat_diff = ixa->second - ixb->second;
+            } else {
+                auto ixa = exit_lat_in_entry_ref_.find(pair.id_a);
+                auto ixb = exit_lat_in_entry_ref_.find(pair.id_b);
+                if (ixa == exit_lat_in_entry_ref_.end() ||
+                    ixb == exit_lat_in_entry_ref_.end()) continue;
+                lat_diff = ixa->second - ixb->second;
+            }
+            if (std::abs(lat_diff) < LAT_EPS) continue;
             if (rank_diff * lat_diff > 0)
                 pair.exempt = CrossExemption::StructuralCross;
+
         } else if (same_exit) {
-            // Exit-cluster cross-arm pair: rank vs entry_lat
+            // use exit-group lateral instead of entry_lat
+            // entry_lat_in_exit_ref_ == sort key → product always < 0 → never fires.
             auto ira = exit_cluster_rank_.find(pair.id_a);
             auto irb = exit_cluster_rank_.find(pair.id_b);
-            auto ixa = entry_lat_in_exit_ref_.find(pair.id_a);
-            auto ixb = entry_lat_in_exit_ref_.find(pair.id_b);
-            if (ira == exit_cluster_rank_.end() || irb == exit_cluster_rank_.end())continue;
-            if (ixa == entry_lat_in_exit_ref_.end() || ixb == entry_lat_in_exit_ref_.end())continue;
-            double rank_diff = (double) (ira->second - irb->second);
-            double lat_diff = ixa->second - ixb->second;
-            if (std::abs(lat_diff) < LAT_EPS)continue;
+            auto ixa = exit_lat_in_exit_group_ref_.find(pair.id_a);
+            auto ixb = exit_lat_in_exit_group_ref_.find(pair.id_b);
+            if (ira == exit_cluster_rank_.end() || irb == exit_cluster_rank_.end()) continue;
+            if (ixa == exit_lat_in_exit_group_ref_.end() ||
+                ixb == exit_lat_in_exit_group_ref_.end()) continue;
+            double rank_diff = (double)(ira->second - irb->second);
+            double lat_diff  = ixa->second - ixb->second;
+            if (std::abs(lat_diff) < LAT_EPS) continue;
             if (rank_diff * lat_diff > 0)
                 pair.exempt = CrossExemption::StructuralCross;
         }
@@ -195,13 +276,17 @@ void ClusterOrderSolver::build(
     entry_group_order_.clear();
     exit_group_order_.clear();
     pairs_.clear();
+    is_uturn_.clear();
+    exit_lat_sign_.clear();
+    entry_lat_in_entry_ref_.clear();
     exit_lat_in_entry_ref_.clear();
     entry_lat_in_exit_ref_.clear();
+    exit_lat_in_exit_group_ref_.clear();
     entry_cluster_rank_.clear();
     exit_cluster_rank_.clear();
 
     // Step 1: group by enterGroupId / exitGroupId
-    for (auto &c:conns) {
+    for (auto& c : conns) {
         if (!c.enterGroupId.empty())entry_group_order_[c.enterGroupId].push_back(c.id);
         if (!c.exitGroupId.empty())exit_group_order_[c.exitGroupId].push_back(c.id);
     }
@@ -303,9 +388,17 @@ void ClusterOrderSolver::build(
             entry_cluster_rank_[cids[i]] = i;
             auto *c = findConn(conns, cids[i]);
             if (!c)continue;
+            const Lane *el = findLane(lanes, c->entry_lane_id);
             const Lane *xl = findLane(lanes, c->exit_lane_id);
             // exit_lat in entry arm reference (higher = more LEFT)
-            exit_lat_in_entry_ref_[cids[i]] = (exitEndpoint(xl) - me).dot(perp);
+            double elat = (exitEndpoint(xl) - me).dot(perp);
+            exit_lat_in_entry_ref_[cids[i]] = elat;
+            exit_lat_sign_[cids[i]] = elat; // raw value for sign comparison
+            const Lane *entl = findLane(lanes, c->entry_lane_id);
+            entry_lat_in_entry_ref_[cids[i]] = (entryEndpoint(entl) - me).dot(perp);
+            Vec2d t0 = entryTangent(el);
+            Vec2d t1 = exitTangent(xl);
+            is_uturn_[cids[i]] = (t0.dot(t1) < -0.5);
         }
     }
 
@@ -313,13 +406,23 @@ void ClusterOrderSolver::build(
         auto &gid = kv.first;
         auto &cids = kv.second;
         Vec2d ealn = armLeftNormal(cids, conns, lanes, false);
+        Vec2d exit_ref_pt = meanPt(cids, conns, lanes, false);
         for (int i = 0; i < (int) cids.size(); ++i) {
             exit_cluster_rank_[cids[i]] = i;
             auto *c = findConn(conns, cids[i]);
             if (!c)continue;
             const Lane *el = findLane(lanes, c->entry_lane_id);
-            // entry_lat in exit arm reference (higher = more LEFT)
+            const Lane *xl = findLane(lanes, c->exit_lane_id);
+            // entry_lat in exit arm reference (used for existing same_exit check — kept for compat.)
             entry_lat_in_exit_ref_[cids[i]] = entryEndpoint(el).dot(ealn);
+            // exit_lat in exit group's own frame: (exit_endpoint − mean_exit) · exit_arm_left_normal
+            exit_lat_in_exit_group_ref_[cids[i]] = (exitEndpoint(xl) - exit_ref_pt).dot(ealn);
+            // Also populate is_uturn_ for conns not appearing in any entry group
+            if (!is_uturn_.count(cids[i])) {
+                Vec2d t0 = entryTangent(el);
+                Vec2d t1 = exitTangent(xl);
+                is_uturn_[cids[i]] = (t0.dot(t1) < -0.5);
+            }
         }
     }
 
@@ -334,7 +437,9 @@ void ClusterOrderSolver::build(
     for (auto &kv:exit_group_order_) {
         auto &gid = kv.first;
         auto &cids = kv.second;
-        if (cids.size() > 1)addPairsFromSortedCluster(cids, conns, lanes);
+        if (cids.size() > 1) {
+            addPairsFromSortedCluster(cids, conns, lanes);
+        }
     }
 
     // Step 9: detect and mark true topological inversions as StructuralCross

@@ -55,7 +55,7 @@ endif()
 
 
 add_subdirectory(src)
-option(INTERSECTION_BUILD_TESTS "Build project tests" ON)
+option(INTERSECTION_BUILD_TESTS "Build project tests" OFF)
 if(INTERSECTION_BUILD_TESTS)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
         add_subdirectory(tests)

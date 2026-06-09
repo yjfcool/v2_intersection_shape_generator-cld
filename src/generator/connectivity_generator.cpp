@@ -5,11 +5,13 @@
 #include "utils.h"
 #include "optimizer/sdf_field.h"
 #include "constraints/infeasibility_detector.h"
+#include "utils/quadtree.h"
 #include <chrono>
 #include <algorithm>
 #include <map>
 #include <cmath>
 #include <iostream>
+#include <memory>
 
 // ── IntersectionInput helpers ─────────────────────────────────────────────────
 const bool IntersectionInput::IsEntryLane(const LaneId& id) const {
@@ -87,6 +89,52 @@ std::pair<Vec2d, Vec2d> IntersectionInput::exitPtDir(const LaneId& lid) const {
 //  is already in `done` and will be passed as a sibling with correct
 //  expected_side, giving the optimizer a correct reference from the start.
 // ─────────────────────────────────────────────────────────────────────────────
+//
+//
+// "排序时转向信息优先按方位计算为准,而不要强依赖输入数据中的ConnTurnType输入信息数据中转向类型不一定准确".
+// Compute turn type geometrically from endpoint tangents, not from conn.turn_type.
+//
+// Algorithm:
+//   t0 = entry lane tangent (pointing INTO the intersection)
+//   t1 = exit  lane tangent (pointing OUT of the intersection)
+//   • T0·T1 < −0.5  → anti-parallel exit → U-turn  (priority 2)
+//   • |cross2d(t0, path_dir)| < 0.25  → near-straight (priority 0)
+//   • cross2d(t0, path_dir) > 0 → left turn, < 0 → right turn  (priority 1)
+// where path_dir = (exit_pt − entry_pt).normalized()
+static int globalTurnPriorityGeometric(
+    const Connectivity& conn, const IntersectionInput& inp) {
+    // Get endpoint geometry
+    auto kv0 = inp.entryPtDir(conn.entry_lane_id);
+    auto& p0 = kv0.first;
+    auto& t0 = kv0.second;
+    auto kv1 = inp.exitPtDir (conn.exit_lane_id);
+    auto& p1 = kv1.first;
+    auto& t1 = kv1.second;
+
+    if (t0.norm() < 1e-9 || t1.norm() < 1e-9) {
+        // Fallback to declared type when geometry is degenerate
+        switch (conn.turn_type) {
+        case ConnTurnType::Straight:   return 0;
+        case ConnTurnType::UTurnLeft:
+        case ConnTurnType::UTurnRight: return 2;
+        default:                       return 1;
+        }
+    }
+    t0.normalize(); t1.normalize();
+
+    // U-turn: exit tangent anti-parallel to entry tangent
+    if (t0.dot(t1) < -0.5) return 2;
+
+    // Distinguish straight / turn by bearing from entry to exit
+    Vec2d d = p1 - p0;
+    if (d.norm() < 1e-9) return 0;
+    d.normalize();
+    double c = cross2d(t0, d); // positive → left, negative → right
+    if (std::abs(c) < 0.25)   return 0; // straight (< ~15°)
+    return 1;                            // left or right turn
+}
+
+// Legacy wrapper kept for readability – not used for priority any more.
 static int globalTurnPriority(ConnTurnType t) {
     switch (t) {
     case ConnTurnType::Straight: return 0;
@@ -112,10 +160,10 @@ void GlobalCoordinator::build(
         }
     }
 
-    // Group by turn priority
+    // Group by geometric turn priority (not conn.turn_type which may be wrong)
     std::map<int, std::vector<const Connectivity*>> pm;
     for (auto& c : conns)
-        pm[globalTurnPriority(c.turn_type)].push_back(&c);
+        pm[globalTurnPriorityGeometric(c, inp)].push_back(&c);
 
     groups_.clear();
     for (auto& kv : pm) {
@@ -528,8 +576,10 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
     SDFField sdf_coarse;
     auto roi = input.area.geometry.empty() ? BoundingBox2d{} : input.area.geometry.bbox();
     if (roi.width() < 1) {
-        for (auto& l : input.lanes)
-            for (auto& p : l.geometry.points) roi.expand(p);
+        for (auto& l : input.lanes) {
+            for (auto& p : l.geometry.points)
+                roi.expand(p);
+        }
         roi.min_pt -= Vec2d(20, 20);
         roi.max_pt += Vec2d(20, 20);
     }
@@ -544,18 +594,23 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
 
     std::vector<ConnectivityCurve> results;
     results.reserve(input.connectivities.size());
-
     std::unordered_map<ConnId, const Connectivity*> cmap;
-    for (auto& c : input.connectivities) cmap[c.id] = &c;
-
+    for (auto& c : input.connectivities) {
+        cmap[c.id] = &c;
+    }
     std::unordered_map<ConnId, BezierCurve> done;
     for (auto& group : coord.groups()) {
         for (auto& cid : group.conn_ids) {
             auto* conn = cmap[cid];
             if (!conn) continue;
+
             auto sibs = buildSiblings(cid, done, cluster_solver_, input.connectivities);
+
             auto cc = generateOne(*conn, input, sdf, sdf_coarse, sibs);
-            if (cc.curve) done[cid] = *cc.curve;
+            if (cc.curve) {
+                done[cid] = *cc.curve;
+            }
+
             results.push_back(std::move(cc));
         }
         // After each priority group: mark obstacle-adjacent crossings as soft

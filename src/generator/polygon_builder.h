@@ -358,6 +358,10 @@ private:
         if (poly.size() < 3) return;
         bool expanded = false;
         for (auto& gcl : cls) {
+            auto curve = gcl.curve;
+            if (!curve || curve->segs.empty()) {
+                continue;
+            }
             for (auto& p : gcl.curve->sample(30)) {
                 if (!pointInPolygon(p, poly)) {
                     // 将该点加入多边形（扩展最近边）

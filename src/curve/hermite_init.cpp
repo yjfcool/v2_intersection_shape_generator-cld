@@ -1,5 +1,6 @@
 #include "hermite_init.h"
 #include "optimizer/sdf_field.h"
+#include "curve/curve_utils.h"
 #include "utils.h"
 #include <cmath>
 #include <algorithm>
@@ -617,13 +618,25 @@ BezierCurve buildTwoSegmentUTurn(
     double apex_forward = std::max(
         min_radius, std::max(lat_dist * 1.2, std::abs(forward_dist) + min_radius * 0.6));
 
-    // Apex position: midpoint of p0 and p1, extended forward along entry direction
+    // Apex position: midpoint of p0 and p1, extended along a "forward" direction.
     Vec2d base_mid = 0.5 * (p0 + p1);
-    // The "forward" direction for apex placement is the average of t0 and -t1
-    // (since t1 points backwards for a U-turn, -t1 points forward from p1's perspective)
-    Vec2d forward_dir = (T0 - T1); // sum of forward-pointing directions
-    if (forward_dir.norm() < 1e-8) forward_dir = T0; // fallback
-    forward_dir.normalize();
+    Vec2d forward_dir;
+    double dot_t0_t1 = T0.dot(T1);
+    if (dot_t0_t1 < -0.85) {
+        // Nearly anti-parallel: use the lateral direction toward p1
+        forward_dir = perp_left;
+        if ((p1 - p0).dot(forward_dir) < 0) forward_dir = -forward_dir;
+        // apex_forward must clear both the lateral AND forward span of the chord
+        double chord = (p1 - p0).norm();
+        apex_forward = std::max(apex_forward,
+                                std::sqrt(chord * chord * 0.25 + forward_dist * forward_dist * 0.25)
+                                + min_radius * 0.5);
+    } else {
+        // General case: original formula
+        forward_dir = (T0 - T1); // sum of "forward" directions
+        if (forward_dir.norm() < 1e-8) forward_dir = T0;
+        forward_dir.normalize();
+    }
 
     Vec2d apex = base_mid + forward_dir * apex_forward;
 
@@ -642,13 +655,20 @@ BezierCurve buildTwoSegmentUTurn(
     }
 
     // Apex tangent: lateral direction at the top of the U-turn arc.
-    // This should be perpendicular to the forward direction, pointing from
-    // p0-side towards p1-side to maintain consistent arc orientation.
     Vec2d apex_perp{-forward_dir[1], forward_dir[0]}; // left of forward
-    // Determine correct lateral sign: apex tangent should point from the
-    // p0 side of the arc towards the p1 side
     double sign = (p1 - p0).dot(apex_perp);
-    Vec2d T_apex = (sign >= 0) ? apex_perp : -apex_perp;
+    Vec2d T_apex;
+    if (dot_t0_t1 < -0.85) {
+        // Anti-parallel fix: T_apex = T0 rotated 90° toward the turn side.
+        // For left U-turn: rotate T0 by -90° (CW) → points "across" the arc.
+        // Determine turn side from lateral_offset.
+        if (lateral_offset >= 0)
+            T_apex = Vec2d(T0[1], -T0[0]);  // CW rotation of T0 = right of T0
+        else
+            T_apex = Vec2d(-T0[1], T0[0]);  // CCW rotation = left of T0
+    } else {
+        T_apex = (sign >= 0) ? apex_perp : -apex_perp;
+    }
 
     // Build the 2-segment G1 curve through {p0, apex, p1}
     // Use alpha ≈ 0.39 which approximates a circular arc well for 90° turns

@@ -3,6 +3,7 @@
 #include "optimizer/penalty_cost.h"
 #include "optimizer/lbfgs_solver.h"
 #include "constraints/cluster_order.h"
+#include "utils/quadtree.h"
 
 struct OptGroup {
     std::vector<ConnId> conn_ids;
@@ -27,17 +28,19 @@ public:
 private:
     LBFGSSolver solver_;
     ClusterOrderSolver cluster_solver_;
+    std::unique_ptr<QuadTree> quad_tree_; // Persistent spatial index for faster sibling queries across all curves
 
+private:
     ConnectivityCurve generateOne(
-        const Connectivity&, const IntersectionInput&,
-        const SDFField&, const SDFField&, const std::vector<SiblingCurve>&);
+        const Connectivity& conn, const IntersectionInput& input,
+        const SDFField& sdf, const SDFField& sdf_coarse, const std::vector<SiblingCurve>& siblings);
 
     std::vector<SiblingCurve> buildSiblings(
-        const ConnId&, const std::unordered_map<ConnId, BezierCurve>&,
-        const ClusterOrderSolver&, const std::vector<Connectivity>&) const;
+        const ConnId& id, const std::unordered_map<ConnId, BezierCurve>& done,
+        const ClusterOrderSolver& cs, const std::vector<Connectivity>& conns) const;
 
     BezierCurve postProcess(
-        const BezierCurve&, const SDFField&, const Polygon2d&, double kmax,
+        const BezierCurve& c, const SDFField& sdf, const Polygon2d& fence, double kmax,
         const Vec2d& t0_orig, const Vec2d& t1_orig, bool skip_elastic_band = false,
         const Vec2d* p0_exact = nullptr, const Vec2d* p1_exact = nullptr);
 

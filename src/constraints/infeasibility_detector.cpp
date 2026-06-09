@@ -2,7 +2,7 @@
 #include "fence_check.h"
 #include "optimizer/sdf_field.h"
 #include "utils.h"
-#include "clipper.hpp"
+#include "utils/clipper.hpp"
 #include <queue>
 #include <unordered_set>
 #include <cmath>

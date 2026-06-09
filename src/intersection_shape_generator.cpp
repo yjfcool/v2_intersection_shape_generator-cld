@@ -20,8 +20,8 @@ inline const char* turnTypeName(ConnTurnType t) {
     case ConnTurnType::Straight: return "Straight";
     case ConnTurnType::TurnRight: return "TurnRight";
     case ConnTurnType::UTurnRight: return "UTurnRight";
+    default: return "Unknown";
     }
-    return "Unknown";
 }
 
 static ConnTurnType inferTurn(const Connectivity& conn, const IntersectionInput& inp) {
@@ -48,7 +48,7 @@ static ConnTurnType inferTurn(const Connectivity& conn, const IntersectionInput&
 ValidationReport validateTopology(const IntersectionInput& input) {
     ValidationReport r;
     for (auto& g : input.lane_groups)
-        if ((int)g.boundaries.size() != (int)g.lanes.size() + 1)
+        if (g.boundaries.size() > 0 && g.boundaries.size() != g.lanes.size() + 1)
             r.errors.push_back("Group " + g.id + ": boundary count mismatch (expected "
                 + std::to_string(g.lanes.size() + 1) + ", got "
                 + std::to_string(g.boundaries.size()) + ")");
@@ -77,10 +77,10 @@ bool IntersectionShapeGenerator::generate(const IntersectionInput& input, Inters
     if (!input.area.geometry.outer.empty())
         roi = input.area.geometry.bbox();
     else {
-        for (auto& l : input.lanes)
+        for (auto& l : input.lanes) {
             for (auto& p : l.geometry.points)
                 roi.expand(p);
-        //if(roi.empty()) for(auto&g:input.lane_groups)roi.expand(g.ref_point);
+        }
         roi.min_pt -= Vec2d(20, 20);
         roi.max_pt += Vec2d(20, 20);
     }

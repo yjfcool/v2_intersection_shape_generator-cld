@@ -1,8 +1,9 @@
 #pragma once
-#include "types.h"
+#include <iostream>
 #include <map>
 #include <set>
 
+#include "types.h"
 #include "curve/bezier.h"
 
 /**
@@ -74,8 +75,14 @@ public:
             if (sorted.size() > 1) {
                 for (size_t i = 0; i < sorted.size(); ++i) {
                     for (size_t j = i + 1; j < sorted.size(); ++j) {
-                        if (sorted[i]->curve->sample(50).size() < 2 || sorted[j]->curve->sample(50).size() < 2) continue;
-                        if (polylinesIntersectExcludeEndpoints(sorted[i]->curve->sample(50), sorted[j]->curve->sample(50))) {
+                        auto icurve = sorted[i]->curve;
+                        auto jcurve = sorted[j]->curve;
+                        if (!icurve || icurve->empty()) continue;
+                        if (!jcurve || jcurve->empty()) continue;
+                        auto ismps = icurve->sample(50);
+                        auto jsmps = jcurve->sample(50);
+                        if (ismps.size() < 2 || jsmps.size() < 2) continue;
+                        if (polylinesIntersectExcludeEndpoints(ismps, jsmps)) {
                             specialIds.insert(sorted[i]->id);
                             specialIds.insert(sorted[j]->id);
                         }

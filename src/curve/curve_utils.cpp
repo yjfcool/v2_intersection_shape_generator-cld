@@ -25,15 +25,16 @@ std::vector<Vec2d> elasticBandSmooth(const std::vector<Vec2d>& pts, const SDFFie
                                      const Polygon2d& fence, double km, double ms, int mi, double msc) {
     auto res = pts;
     int N = (int)res.size();
-    if (N < 3)return res;
+    if (N < 3) return res;
+
     for (int iter = 0; iter < mi; ++iter) {
         bool ch = false;
         for (int i = 1; i < N - 1; ++i) {
             double k = localCurvature(res[i - 1], res[i], res[i + 1]);
-            if (k <= km)continue;
+            if (k <= km) continue;
             Vec2d cen = circumcenter(res[i - 1], res[i], res[i + 1]);
             Vec2d dir = res[i] - cen;
-            if (dir.norm() < 1e-10)continue;
+            if (dir.norm() < 1e-10) continue;
             dir.normalize();
             Vec2d cand = res[i] + dir * ms;
             std::pair<double, Vec2d> _q = sdf.queryWithGrad(cand);
@@ -42,9 +43,105 @@ std::vector<Vec2d> elasticBandSmooth(const std::vector<Vec2d>& pts, const SDFFie
                 ch = true;
             }
         }
-        if (!ch)break;
+        if (!ch) break;
     }
     return res;
+}
+
+// Adaptive version with variable sample count based on curve characteristics
+std::vector<Vec2d> elasticBandSmoothAdaptive(const std::vector<Vec2d>& pts, const SDFField& sdf,
+                                             const Polygon2d& fence, double km, double ms, int mi, double msc) {
+    if (pts.size() < 3) return pts;
+
+    // Calculate curve length to determine initial sample count
+    double curve_length = 0.0;
+    for (size_t i = 1; i < pts.size(); ++i) {
+        curve_length += (pts[i] - pts[i-1]).norm();
+    }
+
+    // Base sample count based on length, with bounds
+    int initial_samples = std::max(10, std::min(200, static_cast<int>(curve_length / 0.5)));
+
+    // Estimate curvature variation for adaptive sampling
+    double total_curvature = 0.0;
+    int curvature_samples = std::min(static_cast<int>(pts.size()), 20); // Limit samples for efficiency
+    for (int i = 1; i < curvature_samples - 1; ++i) {
+        double k = localCurvature(pts[std::min(i-1, static_cast<int>(pts.size()-1))],
+                                  pts[i],
+                                  pts[std::min(i+1, static_cast<int>(pts.size()-1))]);
+        total_curvature += k;
+    }
+
+    // Adjust sample count based on curvature
+    double avg_curvature = total_curvature / std::max(1, curvature_samples - 2);
+    int adaptive_samples = std::max(10, static_cast<int>(initial_samples * (1.0 + avg_curvature * 0.5)));
+
+    // Downsample if we have too many points
+    std::vector<Vec2d> current_pts = pts;
+    if (current_pts.size() > adaptive_samples) {
+        current_pts = downsamplePoints(current_pts, adaptive_samples);
+    }
+
+    int N = (int)current_pts.size();
+    if (N < 3) return current_pts;
+
+    // Use early termination based on improvement threshold
+    double improvement_threshold = 1e-4;
+    std::vector<Vec2d> prev_pts = current_pts;
+
+    for (int iter = 0; iter < mi; ++iter) {
+        bool ch = false;
+        for (int i = 1; i < N - 1; ++i) {
+            double k = localCurvature(current_pts[i - 1], current_pts[i], current_pts[i + 1]);
+            if (k <= km) continue;
+            Vec2d cen = circumcenter(current_pts[i - 1], current_pts[i], current_pts[i + 1]);
+            Vec2d dir = current_pts[i] - cen;
+            if (dir.norm() < 1e-10) continue;
+            dir.normalize();
+            Vec2d cand = current_pts[i] + dir * ms;
+            std::pair<double, Vec2d> _q = sdf.queryWithGrad(cand);
+            if (_q.first >= msc && polygonContains(fence, cand)) {
+                current_pts[i] = cand;
+                ch = true;
+            }
+        }
+
+        // Early termination if no significant improvement
+        if (!ch) break;
+
+        // Check for convergence: if points didn't move significantly
+        double max_displacement = 0.0;
+        for (int i = 0; i < N; ++i) {
+            double displacement = (current_pts[i] - prev_pts[i]).norm();
+            max_displacement = std::max(max_displacement, displacement);
+        }
+
+        if (max_displacement < improvement_threshold) {
+            break;
+        }
+
+        prev_pts = current_pts;
+    }
+
+    return current_pts;
+}
+
+// Helper function to downsample points evenly
+std::vector<Vec2d> downsamplePoints(const std::vector<Vec2d>& points, int target_count) {
+    if (points.size() <= target_count) {
+        return points;
+    }
+
+    std::vector<Vec2d> result;
+    result.reserve(target_count);
+
+    double step = static_cast<double>(points.size() - 1) / (target_count - 1);
+    for (int i = 0; i < target_count; i++) {
+        int idx = std::min(static_cast<int>(i * step), static_cast<int>(points.size() - 1));
+        result.push_back(points[idx]);
+    }
+
+    return result;
 }
 
 BezierCurve rebuildFromSmoothedPts(const std::vector<Vec2d>& s, const Vec2d& st, const Vec2d& et) {

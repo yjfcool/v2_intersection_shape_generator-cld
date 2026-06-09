@@ -1,9 +1,10 @@
 #include "sdf_field.h"
 #include "constraints/fence_check.h"
-#include "clipper.hpp"
+#include "utils/clipper.hpp"
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <functional>
 
 Polygon2d SDFField::bufferPolygon(const Polygon2d& poly, double r) {
     if (r <= 0 || poly.outer.empty()) return poly;
@@ -53,31 +54,53 @@ bool SDFField::insideAny(const Vec2d& pt, const std::vector<Polygon2d>& polys) c
 }
 
 void SDFField::build(const BoundingBox2d& roi, const std::vector<Obstacle>& obs, double cs, double buf) {
-    cs_ = cs;
-    roi_ = roi;
-    std::vector<Polygon2d> buffered;
-    for (auto& o : obs) {
-        if (o.geometry.outer.empty()) continue;
-        buffered.push_back(buf > 0 ? bufferPolygon(o.geometry, buf) : o.geometry);
-    }
-    if (buffered.size() > 1) {
-        std::vector<std::vector<std::array<double,2>>> subs;
-        for (auto& p : buffered) if (!p.outer.empty()) subs.push_back(toArray(p.outer));
-        auto sol = ClipperUtil::UnionPaths(subs, ClipperLib::pftNonZero);
-        if (!sol.empty()) {
-            buffered_.clear();
-            for (auto& path : sol) {
-                Polygon2d pg;
-                pg.outer = toArray(path);
-                buffered_.push_back(pg);
+    CacheKey key{roi, obs, cs, buf};
+
+    // Try to retrieve from cache
+    auto it = cache_map_.find(key);
+    if (it != cache_map_.end()) {
+        grid_ = it->second;
+        cs_ = cs;
+        roi_ = roi;
+        // Recreate buffered polygons
+        std::vector<Polygon2d> buffered;
+        for (auto& o : obs) {
+            if (o.geometry.outer.empty()) continue;
+            buffered.push_back(buf > 0 ? bufferPolygon(o.geometry, buf) : o.geometry);
+        }
+        if (buffered.size() > 1) {
+            std::vector<std::vector<std::array<double,2>>> subs;
+            for (auto& p : buffered) if (!p.outer.empty()) subs.push_back(toArray(p.outer));
+            auto sol = ClipperUtil::UnionPaths(subs, ClipperLib::pftNonZero);
+            if (!sol.empty()) {
+                buffered_.clear();
+                for (auto& path : sol) {
+                    Polygon2d pg;
+                    pg.outer = toArray(path);
+                    buffered_.push_back(pg);
+                }
+            } else {
+                buffered_ = buffered;
             }
         } else {
             buffered_ = buffered;
         }
-    } else {
-        buffered_ = buffered;
+        // Calculate rows and cols based on ROI and cell size
+        double mg = cs_;
+        BoundingBox2d ext;
+        ext.min_pt = roi_.min_pt - Vec2d(mg, mg);
+        ext.max_pt = roi_.max_pt + Vec2d(mg, mg);
+        roi_ = ext;
+        cols_ = std::max(2, (int)std::ceil(roi_.width() / cs_));
+        rows_ = std::max(2, (int)std::ceil(roi_.height() / cs_));
+        return;
     }
-    rebuildGrid(buffered_);
+
+    // Not in cache, build normally and store in cache
+    buildInternal(roi, obs, cs, buf);
+
+    // Store in cache
+    cache_map_[key] = grid_;
 }
 
 void SDFField::buildFromPolygons(const BoundingBox2d& roi, const std::vector<Polygon2d>& polys, double cs) {
@@ -177,3 +200,104 @@ Vec2d SDFField::obstaclePenaltyGrad(const Vec2d& pt, double cl) const {
     double s = d - cl;
     return s >= 0 ? Vec2d(0, 0) : 2.0 * s * gd;
 }
+
+// ─── Static cache implementation ──────────────────────────────────────────────────────
+
+// Define static members
+std::unordered_map<SDFField::CacheKey, std::vector<double>, SDFField::CacheKeyHash> SDFField::cache_map_;
+
+bool SDFField::CacheKey::operator==(const CacheKey& other) const {
+    // Compare ROI
+    if (roi.min_pt.x() != other.roi.min_pt.x() || roi.min_pt.y() != other.roi.min_pt.y() ||
+        roi.max_pt.x() != other.roi.max_pt.x() || roi.max_pt.y() != other.roi.max_pt.y()) {
+        return false;
+    }
+
+    // Compare cell size and buffer
+    if (cell_size != other.cell_size || buffer != other.buffer) {
+        return false;
+    }
+
+    // Compare obstacles - simplified check based on size and positions for efficiency
+    if (obstacles.size() != other.obstacles.size()) {
+        return false;
+    }
+
+    // For each obstacle, check basic properties
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+        const auto& obs1 = obstacles[i];
+        const auto& obs2 = other.obstacles[i];
+
+        if (obs1.geometry.outer.size() != obs2.geometry.outer.size()) {
+            return false;
+        }
+
+        // Check a few key points to determine similarity
+        if (!obs1.geometry.outer.empty() && !obs2.geometry.outer.empty()) {
+            if (std::abs(obs1.geometry.outer[0].x() - obs2.geometry.outer[0].x()) > 1e-6 ||
+                std::abs(obs1.geometry.outer[0].y() - obs2.geometry.outer[0].y()) > 1e-6) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+std::size_t SDFField::CacheKeyHash::operator()(const SDFField::CacheKey& k) const {
+    std::size_t h1 = std::hash<double>{}(k.roi.min_pt.x());
+    std::size_t h2 = std::hash<double>{}(k.roi.min_pt.y());
+    std::size_t h3 = std::hash<double>{}(k.roi.max_pt.x());
+    std::size_t h4 = std::hash<double>{}(k.roi.max_pt.y());
+    std::size_t h5 = std::hash<double>{}(k.cell_size);
+    std::size_t h6 = std::hash<double>{}(k.buffer);
+    std::size_t h7 = std::hash<size_t>{}(k.obstacles.size());
+
+    // Hash some key points from obstacles if they exist
+    std::size_t h8 = 0;
+    if (!k.obstacles.empty() && !k.obstacles[0].geometry.outer.empty()) {
+        h8 = std::hash<double>{}(k.obstacles[0].geometry.outer[0].x() +
+                                 k.obstacles[0].geometry.outer[0].y());
+    }
+
+    // Combine hashes
+    return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3) ^ (h5 << 4) ^ (h6 << 5) ^ (h7 << 6) ^ (h8 << 7);
+}
+
+void SDFField::clearCache() {
+    cache_map_.clear();
+}
+
+size_t SDFField::getCacheSize() {
+    return cache_map_.size();
+}
+
+void SDFField::buildInternal(const BoundingBox2d& roi, const std::vector<Obstacle>& obs, double cs, double buf) {
+    cs_ = cs;
+    roi_ = roi;
+    std::vector<Polygon2d> buffered;
+    for (auto& o : obs) {
+        if (o.geometry.outer.empty()) continue;
+        buffered.push_back(buf > 0 ? bufferPolygon(o.geometry, buf) : o.geometry);
+    }
+    if (buffered.size() > 1) {
+        std::vector<std::vector<std::array<double,2>>> subs;
+        for (auto& p : buffered) if (!p.outer.empty()) subs.push_back(toArray(p.outer));
+        auto sol = ClipperUtil::UnionPaths(subs, ClipperLib::pftNonZero);
+        if (!sol.empty()) {
+            buffered_.clear();
+            for (auto& path : sol) {
+                Polygon2d pg;
+                pg.outer = toArray(path);
+                buffered_.push_back(pg);
+            }
+        } else {
+            buffered_ = buffered;
+        }
+    } else {
+        buffered_ = buffered;
+    }
+    rebuildGrid(buffered_);
+}
+
+// ─── End of file additions ────────────────────────────────────────────────────────────
