@@ -13,10 +13,10 @@ int main(int argc, char* argv[]) {
         files.emplace_back(argv[1]);
     } else {
         files = {
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_input.json",
+            //std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_input.json",
             // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_ds.json",
             // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_jd.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
             // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
             // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643.json",
             // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699.json",

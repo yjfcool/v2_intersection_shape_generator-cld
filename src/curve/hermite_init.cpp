@@ -522,6 +522,28 @@ static BezierCurve geometricInitLevel2(
     return makeCurveFromKnots(pts, tans, 0.35);
 }
 
+static bool isUTurnCandidate(const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1) {
+    // Original criterion: anti-parallel tangents (dot product < -0.5)
+    double dot_product = t0.normalized().dot(t1.normalized());
+    if (dot_product < -0.5) return true;
+
+    // Enhanced criterion: geometric configuration suggesting U-turn behavior
+    // If the angle between tangents is greater than 135 degrees (3π/4), consider it a U-turn
+    double angle_between = angleBetween(t0, t1);
+    if (angle_between > M_PI * 0.75) return true;  // > 135 degrees
+
+    // Additional geometric check: if the exit point is generally behind the entry direction
+    Vec2d displacement = (p1 - p0).normalized();
+    double entry_alignment = t0.normalized().dot(displacement);
+
+    // If entry and exit are generally in opposite directions and not aligned, likely a U-turn
+    if (entry_alignment < -0.3 && angle_between > M_PI * 0.5) {
+        return true;
+    }
+
+    return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Public API
 // ─────────────────────────────────────────────────────────────────────────────
@@ -529,7 +551,8 @@ BezierCurve buildInitialCurve(
     const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
     const SDFField& sdf, const Polygon2d& fence, const std::vector<std::vector<Vec2d>>& sibling_polys) {
     // U-turn: special case
-    if (angleBetween(t0, t1) > M_PI * 0.85)
+    // Enhanced detection to handle near-anti-parallel cases and geometric U-turn configurations
+    if (isUTurnCandidate(p0, t0, p1, t1))
         return buildTwoSegmentUTurn(p0, t0, p1, t1, sdf, fence);
 
     // Penetration-only clearance: only trigger bypass when the curve actually
@@ -622,8 +645,10 @@ BezierCurve buildTwoSegmentUTurn(
     Vec2d base_mid = 0.5 * (p0 + p1);
     Vec2d forward_dir;
     double dot_t0_t1 = T0.dot(T1);
-    if (dot_t0_t1 < -0.85) {
-        // Nearly anti-parallel: use the lateral direction toward p1
+
+    // Enhanced logic to handle near-anti-parallel cases
+    if (dot_t0_t1 < -0.3) {  // Extended threshold from -0.85 to -0.3
+        // Near anti-parallel: use the lateral direction toward p1
         forward_dir = perp_left;
         if ((p1 - p0).dot(forward_dir) < 0) forward_dir = -forward_dir;
         // apex_forward must clear both the lateral AND forward span of the chord
@@ -632,10 +657,17 @@ BezierCurve buildTwoSegmentUTurn(
                                 std::sqrt(chord * chord * 0.25 + forward_dist * forward_dist * 0.25)
                                 + min_radius * 0.5);
     } else {
-        // General case: original formula
-        forward_dir = (T0 - T1); // sum of "forward" directions
+        // General case: original formula with adjustment for near-U-turn configurations
+        // Use average of entry and exit tangents to determine forward direction
+        forward_dir = (T0 - T1).normalized(); // Direction from exit toward entry
         if (forward_dir.norm() < 1e-8) forward_dir = T0;
         forward_dir.normalize();
+
+        // Adjust apex forward distance based on angular difference
+        double angle_diff = std::acos(std::max(-1.0, std::min(1.0, -dot_t0_t1))); // angle in [0, π]
+        if (angle_diff > M_PI * 0.5) {  // More than 90 degrees - likely a U-turn
+            apex_forward *= std::max(1.0, angle_diff / (M_PI * 0.5)); // Scale up for larger angles
+        }
     }
 
     Vec2d apex = base_mid + forward_dir * apex_forward;
@@ -658,7 +690,7 @@ BezierCurve buildTwoSegmentUTurn(
     Vec2d apex_perp{-forward_dir[1], forward_dir[0]}; // left of forward
     double sign = (p1 - p0).dot(apex_perp);
     Vec2d T_apex;
-    if (dot_t0_t1 < -0.85) {
+    if (dot_t0_t1 < -0.3) {  // Extended threshold
         // Anti-parallel fix: T_apex = T0 rotated 90° toward the turn side.
         // For left U-turn: rotate T0 by -90° (CW) → points "across" the arc.
         // Determine turn side from lateral_offset.

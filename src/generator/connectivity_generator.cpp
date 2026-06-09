@@ -297,7 +297,7 @@ static bool needsLateralOffset(
 
         // For expected_side=-1 (sibling should be to my RIGHT = sibling has SMALLER lat):
         // Violation if my_lat < sib_lat + MARGIN (I'm not far enough to the LEFT)
-        double margin = 0.5;  // 50cm clearance for initial curve
+        double margin = 1.0;  // Increased from 0.5 to 1.0m clearance for initial curve to prevent intersections
         double viol = sib_lat + margin - my_lat;  // positive = violation
         if (viol > worst_violation) {
             worst_violation = viol;
@@ -322,7 +322,7 @@ static bool needsLateralOffset(
         Vec2d mid = 0.5*(p0+p1);
         double my_lat = mid.dot(s.ref_perp);
 
-        double margin = 0.5;
+        double margin = 1.0;  // Increased from 0.5 to 1.0m
         double viol = my_lat + margin - sib_lat;  // positive = violation (I'm too far LEFT)
         // Only apply if stronger than current violation from other direction
         if (viol > worst_violation && required_push_side == 0) {
@@ -332,10 +332,50 @@ static bool needsLateralOffset(
         }
     }
 
+    // Additionally, check for potential crossings with same-group siblings
+    // by examining both endpoints and considering curve trajectories
+    for (auto& s : siblings) {
+        if (s.exempt_a1) continue;
+        // Check for potential crossings regardless of expected_side for same-group connections
+        if (s.ref_perp.norm() < 1e-9) continue;
+
+        // Calculate distances between current path and sibling path at start/end points
+        Vec2d sib_start = s.curve.startPt();
+        Vec2d sib_end = s.curve.endPt();
+
+        // Check if this is a same-group connection (same entry or exit group)
+        // If so, we may need additional separation
+        double start_sep = std::abs((p0 - sib_start).dot(s.ref_perp));
+        double end_sep = std::abs((p1 - sib_end).dot(s.ref_perp));
+
+        // If already quite close laterally and in same group context, enforce more separation
+        if (start_sep < 2.0 && end_sep < 2.0) {
+            double required_sep = 2.0; // Enforce 2m separation for potentially conflicting curves
+            double current_sep = std::min(start_sep, end_sep);
+            if (required_sep > current_sep) {
+                double needed_sep = required_sep - current_sep;
+                // Determine direction based on relative positions
+                Vec2d my_mid = 0.5 * (p0 + p1);
+                Vec2d sib_mid = 0.5 * (sib_start + sib_end);
+
+                double my_lat = my_mid.dot(s.ref_perp);
+                double sib_lat = sib_mid.dot(s.ref_perp);
+
+                int sep_side = (my_lat > sib_lat) ? -1 : +1;  // Push away from sibling
+
+                if (needed_sep > worst_violation) {
+                    worst_violation = needed_sep;
+                    ref_perp = s.ref_perp;
+                    required_push_side = sep_side;
+                }
+            }
+        }
+    }
+
     if (worst_violation < 1e-3 || required_push_side == 0) return false;
 
     out_side     = required_push_side;
-    out_offset_m = worst_violation + 0.3;  // add extra margin
+    out_offset_m = worst_violation + 0.5;  // Increased extra margin from 0.3 to 0.5
     return true;
 }
 
