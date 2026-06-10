@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+namespace isg {
+
 void QuadTree::subdivide(Node* node) {
     double half_width = node->bounds.width() / 2.0;
     double half_height = node->bounds.height() / 2.0;
@@ -132,4 +134,6 @@ std::vector<std::pair<BezierCurve, std::string>> QuadTree::queryRange(const Boun
 
 void QuadTree::clear() {
     root_ = make_unique_cpp11<Node>(root_->bounds);
+}
+
 }

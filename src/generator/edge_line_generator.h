@@ -6,6 +6,8 @@
 #include "types.h"
 #include "curve/bezier.h"
 
+namespace isg {
+
 /**
  * Edge line generator (optimized shared-edge version)
  *
@@ -636,3 +638,5 @@ private:
         return getConnTangent(clit->geometry.points, is_entryline); //clit->tangentDir;
     }
 };
+
+}

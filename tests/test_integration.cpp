@@ -8,6 +8,8 @@
 
 using Catch::Matchers::WithinAbs;
 
+using namespace isg;
+
 // ──────────────────────────────────────────────────────────────
 //  Minimal 2-direction intersection builder
 //  East-entry → West-exit (straight)

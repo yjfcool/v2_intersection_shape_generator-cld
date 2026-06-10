@@ -5,6 +5,8 @@
 #include "optimizer/sdf_field.h"
 #include "curve/bezier.h"
 
+using namespace isg;
+
 // ──────────────────────────────────────────────────────────────
 //  Helpers: build simple connectivity set
 // ──────────────────────────────────────────────────────────────

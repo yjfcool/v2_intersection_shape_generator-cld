@@ -19,6 +19,8 @@
 
 using Catch::Matchers::WithinAbs;
 
+using namespace isg;
+
 #define TEST_4WAY
 #define TEST_T
 #define TEST_Y

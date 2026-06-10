@@ -6,6 +6,8 @@
 #include <array>
 #include <map>
 
+namespace isg {
+
 using Vec2d = Eigen::Vector2d;
 using VecXd = Eigen::VectorXd;
 
@@ -89,6 +91,7 @@ struct BezierSegment {
     std::vector<Vec2d> sampleCount(int n) const; // 固定数量采样
     std::vector<Vec2d> sampleBySpacing(double spacing) const; // 固定间距采样（弧长近似）
     std::vector<Vec2d> sampleAdaptive(double maxAngleDeg, double maxSeg, double minSeg) const; // 自适应采样（基于角度误差）
+    std::vector<Vec2d> sampleByShape(double straightSpacing, double angularResolution, double minSpacing) const;
     void subdivide(double t0, double t1, double maxAngle, double maxSeg, double minSeg,
                    std::vector<Vec2d>& pts, int depth) const;
     double getAlpha(const Vec2d& T0) const; // 获取 α（P1相对P0的标量，T0方向）
@@ -108,6 +111,7 @@ struct BezierCurve {
     Vec2d tangent(double u) const;
     std::vector<Vec2d> sample(int n) const;
     std::vector<Vec2d> sampleByArcLength(int n) const;
+    std::vector<Vec2d> sampleByShape(double straightSpacing = 3.0, double angularResolution = 10.0, double minSpacing = 0.05) const;  // 形态自适应采样
     double arcLength() const;
     BoundingBox2d bbox() const;
     double maxCurvature(int sps = 20) const;
@@ -292,3 +296,5 @@ struct AdaptiveRefineResult {
     BezierCurve curve;
     bool was_split = false;
 };
+
+}

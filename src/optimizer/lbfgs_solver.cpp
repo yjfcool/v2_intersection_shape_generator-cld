@@ -6,6 +6,8 @@
 #include <deque>
 #include <cassert>
 
+namespace isg {
+
 // ── Cubic interpolation for interval [a, b] ──────────────────────────────────
 // Finds minimiser of cubic through (a, fa, ga) and (b, fb, gb) in [a,b].
 static double cubicMinimiser(double a, double fa, double ga, double b, double fb, double gb) {
@@ -222,4 +224,6 @@ SolveResult LBFGSSolver::solve(CostFn fn, const VecXd& x0) {
 
 SolveResult LBFGSSolver::solveWarm(CostFn fn, const VecXd& x_warm) {
     return solve(fn, x_warm); // history naturally resets; warm start just from x
+}
+
 }

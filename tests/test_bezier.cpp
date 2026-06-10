@@ -9,6 +9,8 @@
 
 using Catch::Matchers::WithinAbs;
 
+using namespace isg;
+
 // ──────────────────────────────────────────────────────────────
 TEST_CASE("BezierSegment evaluate endpoints", "[bezier]") {
     BezierSegment s;

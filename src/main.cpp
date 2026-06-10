@@ -14,12 +14,12 @@ int main(int argc, char* argv[]) {
     } else {
         files = {
             std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_input.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_ds.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_jd.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_ds.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_jd.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699.json",
         };
     }
 
@@ -29,13 +29,13 @@ int main(int argc, char* argv[]) {
         //if (access(fpth.c_str(), F_OK) == -1) continue;
         std::string fname = fspath.stem().string();
         std::cout << "\n===== Loading input from: " << fname << " =====" << std::endl;
-        std::vector<IntersectionInput> inputs = {IntersectionIO::loadFromFile(fpth)};
+        std::vector<isg::IntersectionInput> inputs = {isg::IntersectionIO::loadFromFile(fpth)};
         for (auto& inp : inputs) {
             std::cout << "Processing input with " << inp.connectivities.size() << " connectivities and "
                       << inp.lanes.size() << " lanes" << std::endl;
 
-            IntersectionShapeGenerator gen;
-            IntersectionOutput out;
+            isg::IntersectionShapeGenerator gen;
+            isg::IntersectionOutput out;
 
             auto start_time = std::chrono::high_resolution_clock::now();
             bool success = gen.generate(inp, out);

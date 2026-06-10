@@ -12,6 +12,8 @@
 #include "filesystem.hpp"
 #include "types.h"
 
+namespace isg {
+
 namespace fs = ghc::filesystem;
 
 inline std::vector<ShapePoint> toShapepoints(const std::vector<Vec2d>& points) {
@@ -205,7 +207,7 @@ static bool save(IntersectionOutput& out, std::string out_dir, std::string prefi
             std::vector<std::string> attrs = {
                 pl.id, std::to_string((int)pl.turn_type), pl.entry_lane_id, pl.exit_lane_id
             };
-            std::vector<ShapePoint> points = toShapepoints(pl.curve->sample(50));
+            std::vector<ShapePoint> points = toShapepoints(pl.curve->sampleByShape());
             ShapeRecord record = {
                 ++gid, shpType, attrs, points, {0}
             };
@@ -275,5 +277,7 @@ static bool save(IntersectionOutput& out, std::string out_dir, std::string prefi
     writeLaneEdges(out_dir, prefix + "_laneedges", out.lane_edges);
     writeAreas(out_dir, prefix + "_areas", out.area);
     return true;
+}
+
 }
 #endif //IODATA_SHAPEFILE_H

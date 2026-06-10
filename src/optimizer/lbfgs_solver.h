@@ -2,6 +2,8 @@
 #include "types.h"
 #include <functional>
 
+namespace isg {
+
 struct SolveResult {
     VecXd x;
     double final_cost = 0;
@@ -30,3 +32,5 @@ private:
     double lineSearch(CostFn& fn, const VecXd& x, const VecXd& dir,
                       double f0, const VecXd& g0, VecXd& xn, double& fn_val, VecXd& gn, int& evals);
 };
+
+}

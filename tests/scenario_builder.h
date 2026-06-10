@@ -14,6 +14,8 @@
 #include <sstream>
 #include <cmath>
 
+using namespace isg;
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 inline Vec2d rightPerp(const Vec2d& dir) {
     return Vec2d(dir[1], -dir.x()); // rotate -90° (right side)

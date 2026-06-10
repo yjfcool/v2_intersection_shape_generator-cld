@@ -6,6 +6,8 @@
 #include <cmath>
 #include <numeric>
 
+namespace isg {
+
 // ─── Lane geometry helpers ────────────────────────────────────────────────────
 static const Connectivity *findConn(const std::vector<Connectivity> &cs, const ConnId &id) {
     for (auto &c:cs) if (c.id == id)return &c;
@@ -494,4 +496,6 @@ void ClusterOrderSolver::checkAndMarkA2(
         for (auto& pt : curveCrossings(ia->second, ib->second))
             markObstacleExempt(pair, pt, sdf, r);
     }
+}
+
 }

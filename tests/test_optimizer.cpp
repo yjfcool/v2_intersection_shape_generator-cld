@@ -9,6 +9,8 @@
 
 using Catch::Matchers::WithinAbs;
 
+using namespace isg;
+
 // ──────────────────────────────────────────────────────────────
 //  L-BFGS: minimise a simple quadratic  f = ||x - x*||^2
 // ──────────────────────────────────────────────────────────────

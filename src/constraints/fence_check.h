@@ -2,6 +2,8 @@
 #include "types.h"
 #include "curve/curve_utils.h"
 
+namespace isg {
+
 static bool polygonContains(const Polygon2d& poly, const Vec2d& pt) {
     auto& ring = poly.outer;
     int n = (int)ring.size();
@@ -55,4 +57,6 @@ static bool curveInsideFence(const BezierCurve& c, const Polygon2d& fence, int s
             if (!polygonContains(fence, seg.evaluate((double)i / sps)))
                 return false;
     return true;
+}
+
 }

@@ -6,6 +6,8 @@
 #include <limits>
 #include <functional>
 
+namespace isg {
+
 Polygon2d SDFField::bufferPolygon(const Polygon2d& poly, double r) {
     if (r <= 0 || poly.outer.empty()) return poly;
     Polygon2d out;
@@ -301,3 +303,5 @@ void SDFField::buildInternal(const BoundingBox2d& roi, const std::vector<Obstacl
 }
 
 // ─── End of file additions ────────────────────────────────────────────────────────────
+
+}

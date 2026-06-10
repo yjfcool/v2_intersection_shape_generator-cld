@@ -5,6 +5,8 @@
 #include "lbfgs_solver.h"
 #include <vector>
 
+namespace isg {
+
 struct SiblingCurve {
     BezierCurve curve;
     bool exempt_a1 = false; // true = StructuralCross or cross-arm → skip penalty
@@ -90,3 +92,5 @@ private:
 };
 
 BezierCurve optimiseCurve(PenaltyCost& cost, LBFGSSolver& solver, const BezierCurve& initial, int outer_iters = 5);
+
+}

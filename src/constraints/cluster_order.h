@@ -3,6 +3,8 @@
 #include "types.h"
 #include <unordered_map>
 
+namespace isg {
+
 enum class CrossExemption {
     None, StructuralCross, ObstacleCross
 };
@@ -89,3 +91,5 @@ private:
     std::unordered_map<ConnId, int> entry_cluster_rank_;
     std::unordered_map<ConnId, int> exit_cluster_rank_;
 };
+
+}

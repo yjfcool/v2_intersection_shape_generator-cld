@@ -1,6 +1,8 @@
 #pragma once
 #include "types.h"
 
+namespace isg {
+
 struct SDFField;
 
 // ── BezierSegment & BezierCurve structs are defined in types.h ──
@@ -22,3 +24,5 @@ BezierCurve curveFromParams(const VecXd& params, const BezierCurve& proto);
 VecXd curveToParamsFull(const BezierCurve& c);
 
 BezierCurve curveFromParamsFull(const VecXd& params, const BezierCurve& proto);
+
+}

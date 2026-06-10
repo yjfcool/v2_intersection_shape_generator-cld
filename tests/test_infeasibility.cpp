@@ -4,6 +4,8 @@
 #include "constraints/fence_check.h"
 #include "optimizer/sdf_field.h"
 
+using namespace isg;
+
 static Polygon2d makeSquarePoly(Vec2d c, double half) {
     Polygon2d p;
     p.outer = {{c[0]-half,c[1]-half},{c[0]+half,c[1]-half},

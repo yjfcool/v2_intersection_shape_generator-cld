@@ -4,6 +4,8 @@
 
 using Catch::Matchers::WithinAbs;
 
+using namespace isg;
+
 static Polygon2d makeSquare(Vec2d centre, double half) {
     Polygon2d p;
     p.outer = {

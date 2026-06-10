@@ -7,6 +7,8 @@
 #include <memory>
 #include <sstream>
 
+namespace isg {
+
 // 适配自定义的轻量级JSON库的序列化/反序列化功能
 
 // 为std::vector<std::string>、std::map等类型添加JSON序列化助手
@@ -875,3 +877,5 @@ public:
         return intersectionInputFromJson(j);
     }
 };
+
+}

@@ -7,6 +7,8 @@
 #include <iostream>
 #include <limits>
 
+namespace isg {
+
 /**
  * 精细路口面构建
  * 输入：道路边缘线（独立线段）+ 生成的车道边线端点
@@ -449,3 +451,5 @@ private:
         return hull;
     }
 };
+
+}

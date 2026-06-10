@@ -6,6 +6,7 @@
 #include "generator/polygon_builder.h"
 #include <chrono>
 #include <cmath>
+namespace isg {
 
 IntersectionShapeGenerator::IntersectionShapeGenerator(): cfg_{} {
 }
@@ -105,4 +106,6 @@ bool IntersectionShapeGenerator::generate(const IntersectionInput& input, Inters
     output.perf.area_gen_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
     return true;
+}
+
 }

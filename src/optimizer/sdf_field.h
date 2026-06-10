@@ -2,6 +2,8 @@
 #include "types.h"
 #include <unordered_map>
 
+namespace isg {
+
 class SDFField {
 public:
     void build(const BoundingBox2d&, const std::vector<Obstacle>&, double cs = 0.2, double buf = 0.0);
@@ -55,3 +57,5 @@ private:
     std::vector<Polygon2d> buffered_;
     static std::unordered_map<CacheKey, std::vector<double>, CacheKeyHash> cache_map_; // Static cache storage
 };
+
+}

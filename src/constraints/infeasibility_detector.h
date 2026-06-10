@@ -7,6 +7,8 @@
 #pragma once
 #include "types.h"
 
+namespace isg {
+
 struct PreCheckResult {
     bool topological_block = false, narrow_passage = false, fence_sandwich = false;
     double min_corridor_width = 0.0;
@@ -36,4 +38,6 @@ bool segmentsIntersect2(const Vec2d&, const Vec2d&, const Vec2d&, const Vec2d&);
 inline PreCheckResult preCheck(
     const SDFField& sdf, const Polygon2d& fence, const Vec2d& ep, const Vec2d& xp, double rw) {
     return preCheck(sdf, fence, ep, xp, rw, {});
+}
+
 }

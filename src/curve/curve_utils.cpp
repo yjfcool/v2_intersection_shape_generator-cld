@@ -5,6 +5,8 @@
 #include <cmath>
 #include <algorithm>
 
+namespace isg {
+
 double localCurvature(const Vec2d& a, const Vec2d& b, const Vec2d& c) {
     double ab = (b - a).norm(), bc = (c - b).norm(), ac = (c - a).norm();
     double area = 0.5 * std::abs(cross2d(b - a, c - a));
@@ -252,4 +254,6 @@ bool curvesIntersectBusiness(const BezierCurve& a, const BezierCurve& b, double 
         if (distToAllEndpoints(pt, a, b) > ep)
             return true;
     return false;
+}
+
 }

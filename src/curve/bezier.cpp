@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <numeric>
 
+namespace isg {
+
 Vec2d BezierSegment::evaluate(double t) const {
     double u = 1 - t, u2 = u * u, u3 = u2 * u, t2 = t * t, t3 = t2 * t;
     return u3 * ctrl[0] + 3 * u2 * t * ctrl[1] + 3 * u * t2 * ctrl[2] + t3 * ctrl[3];
@@ -419,4 +421,6 @@ BezierCurve curveFromParamsFull(const VecXd& params, const BezierCurve& proto) {
     // Pin first endpoint too
     c.segs.front().ctrl[0] = proto.segs.front().ctrl[0];
     return c;
+}
+
 }

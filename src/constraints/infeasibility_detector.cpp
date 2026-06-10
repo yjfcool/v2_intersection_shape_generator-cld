@@ -8,6 +8,8 @@
 #include <cmath>
 #include <algorithm>
 
+namespace isg {
+
 bool segmentsIntersect2(const Vec2d& a, const Vec2d& b, const Vec2d& c, const Vec2d& d) {
     Vec2d r = b - a, s = d - c;
     double den = cross2d(r, s);
@@ -181,4 +183,6 @@ ConnectivityCurve makeFallbackCurve(const PreCheckResult& pre, const Connectivit
         out.violation.reason = "Sandwich or narrow; degraded to straight";
     }
     return out;
+}
+
 }

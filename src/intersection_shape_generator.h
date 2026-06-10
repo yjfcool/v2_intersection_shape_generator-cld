@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+namespace isg {
 
 struct ValidationReport {
     std::vector<std::string> errors, warnings;
@@ -24,3 +25,5 @@ private:
     Config cfg_;
     ValidationReport report_;
 };
+
+}

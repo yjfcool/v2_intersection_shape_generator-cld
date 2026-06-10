@@ -4,6 +4,8 @@
 #include <vector>
 #include <memory>
 
+namespace isg {
+
 struct BoundingBox2d;
 
 // Custom make_unique for C++11 compatibility
@@ -51,3 +53,5 @@ private:
     bool intersects(const BoundingBox2d& box, const BezierCurve& curve) const;
     BoundingBox2d getCurveBounds(const BezierCurve& curve) const;
 };
+
+}

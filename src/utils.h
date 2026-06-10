@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <limits>
 
+namespace isg {
+
 using Vec2d = Eigen::Vector2d;
 using VecXd = Eigen::VectorXd;
 static constexpr double PI = 3.14159265358979323846;
@@ -263,4 +265,6 @@ inline Vec2d exitLineTangent(const std::vector<Vec2d>& points) {
         return Vec2d(1, 0);
     Vec2d d = points[1] - points[0];
     return d.norm() > 1e-10 ? d.normalized() : Vec2d(1, 0);
+}
+
 }

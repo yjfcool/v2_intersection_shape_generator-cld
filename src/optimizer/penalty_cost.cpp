@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <limits>
 
+namespace isg {
+
 // ─── Cache rebuild ────────────────────────────────────────────────────────────
 void PenaltyCostCache::rebuild(
         const std::vector<Boundary> &boundaries,
@@ -428,4 +430,6 @@ BezierCurve optimiseCurve(
             break; // all constraints satisfied
     }
     return cost.full_param_mode ? curveFromParamsFull(params, cost.proto) : curveFromParams(params, cost.proto);
+}
+
 }

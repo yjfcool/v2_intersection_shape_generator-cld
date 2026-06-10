@@ -1,5 +1,8 @@
 #pragma once
 #include "bezier.h"
+
+namespace isg {
+
 struct SDFField;
 std::vector<Vec2d> sdfMaxClearancePath(
     const SDFField&, const Polygon2d&, const Vec2d&, const Vec2d&, double alpha = 2.0);
@@ -12,3 +15,5 @@ BezierCurve buildInitialCurve(
 
 BezierCurve buildTwoSegmentUTurn(
     const Vec2d&, const Vec2d&, const Vec2d&, const Vec2d&, const SDFField&, const Polygon2d&);
+
+}

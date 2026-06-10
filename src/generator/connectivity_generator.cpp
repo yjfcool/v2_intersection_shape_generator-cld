@@ -13,6 +13,8 @@
 #include <iostream>
 #include <memory>
 
+namespace isg {
+
 // ── IntersectionInput helpers ─────────────────────────────────────────────────
 const bool IntersectionInput::IsEntryLane(const LaneId& id) const {
     for (auto& lg : lane_groups)
@@ -620,4 +622,6 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
     auto t1 = std::chrono::steady_clock::now();
     if (out_ms) *out_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     return results;
+}
+
 }
