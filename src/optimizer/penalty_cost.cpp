@@ -95,7 +95,10 @@ double PenaltyCost::evalCluster(const BezierCurve& c) const {
     if (cache_.sib_polys.empty())return 0;
 
     constexpr double MARGIN = 0.3;   // m lateral separation
-    constexpr double SIGN_CHANGE_COST = 30.0;  // per-crossing base cost
+    // raised 30.0 → 50.0 — a detected sign-change (actual path crossing)
+    // now produces a much stronger gradient signal than a simple margin violation,
+    // driving the optimizer to uncross adjacent same-direction turns.
+    constexpr double SIGN_CHANGE_COST = 50.0;  // per-crossing base cost
     constexpr double OBS_REDUCE = 0.4;   // weight when obstacle forced (NOT zero)
     constexpr double MAX_DIST = 12.0;  // m nearest-point search radius
     constexpr double SKIP_FRAC = 0.07;  // skip first/last 7%

@@ -5,6 +5,7 @@ node_modules
 *.cld
 *.project
 *.classpath
+*.DS_Store
 .settings/
 .vscode/
 .claude/

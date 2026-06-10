@@ -6,31 +6,32 @@
 #include "intersection_shape_generator.h"
 #include <chrono>
 #include <unistd.h>
+#include <constraints/cluster_order.h>
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
     std::vector<std::string> files;
     if (argc > 1) {
         files.emplace_back(argv[1]);
     } else {
         files = {
-            //std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_input.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_ds.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_jd.json",
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643.json",
-            // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699.json",
+                std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_input.json",
+                // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_ds.json",
+                // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_jd.json",
+                // std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
+                // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
+                // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643.json",
+                // std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699.json",
         };
     }
 
-    for (const auto& fpth : files) {
+    for (const auto &fpth : files) {
         ghc::filesystem::path fspath(fpth);
         if (!ghc::filesystem::exists(fspath)) continue;
         //if (access(fpth.c_str(), F_OK) == -1) continue;
         std::string fname = fspath.stem().string();
         std::cout << "\n===== Loading input from: " << fname << " =====" << std::endl;
         std::vector<IntersectionInput> inputs = {IntersectionIO::loadFromFile(fpth)};
-        for (auto& inp : inputs) {
+        for (auto &inp : inputs) {
             std::cout << "Processing input with " << inp.connectivities.size() << " connectivities and "
                       << inp.lanes.size() << " lanes" << std::endl;
 
@@ -52,15 +53,59 @@ int main(int argc, char* argv[]) {
             if (!success) {
                 std::cout << "Generation failed!" << std::endl;
                 std::cout << "Validation errors: " << gen.lastReport().errors.size() << std::endl;
-                for (const auto& err : gen.lastReport().errors) {
+                for (const auto &err : gen.lastReport().errors) {
                     std::cout << "  " << err << std::endl;
                 }
                 continue;
             }
-            std::cout << "Successfully generated " << out.connectivity_curves.size() << " connectivity curves" << std::endl;
+            std::cout << "Successfully generated " << out.connectivity_curves.size() << " connectivity curves"
+                      << std::endl;
 
             save(inp, "./" + fname + "/input/", "");
             save(out, "./" + fname + "/output/", "");
+
+            // Build cluster solver to dump StructuralCross decisions
+            ClusterOrderSolver cs;
+            cs.build(inp.connectivities, inp.lanes, inp.lane_groups);
+            nlohmann::json j, jsc = nlohmann::json::array(), jpairs = nlohmann::json::array();
+            for (auto &p : cs.pairs()) {
+                nlohmann::json pj;
+                pj["a"] = p.id_a;
+                pj["b"] = p.id_b;
+                pj["sc"] = (p.exempt == CrossExemption::StructuralCross);
+                jpairs.push_back(pj);
+                if (p.exempt == CrossExemption::StructuralCross)
+                    jsc.push_back({p.id_a, p.id_b});
+            }
+            j["structural_crosses"] = jsc;
+            j["all_pairs_count"] = (int) cs.pairs().size();
+            // Dump curves sampled
+            j["curves"] = nlohmann::json::array();
+            for (auto &cc : out.connectivity_curves) {
+                nlohmann::json cj;
+                cj["id"] = cc.id;
+                cj["status"] = (int) cc.status;
+                cj["points"] = nlohmann::json::array();
+                if (cc.curve) {
+                    auto pts = cc.curve->sampleByArcLength(60);
+                    for (auto &p:pts) cj["points"].push_back({p[0], p[1]});
+                }
+                for (auto &c:inp.connectivities)
+                    if (c.id == cc.id) {
+                        cj["enterGroupId"] = c.enterGroupId;
+                        cj["exitGroupId"] = c.exitGroupId;
+                        break;
+                    }
+                j["curves"].push_back(cj);
+            }
+            std::ofstream f("./" + fname + "/output/" + fname + ".json");
+            f << j.dump(2);
+
+            std::cout << "Generated " << out.connectivity_curves.size() << " curves, " << jsc.size()
+                      << " structural crosses\n";
+            int ok = 0, deg = 0;
+            for (auto &c:out.connectivity_curves) { if (c.status == CurveStatus::OK)ok++; else deg++; }
+            std::cout << "OK=" << ok << " Degraded=" << deg << "\n";
         }
     }
 

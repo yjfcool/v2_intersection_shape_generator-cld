@@ -18,7 +18,8 @@ struct PenaltyWeights {
     double obstacle = 30.0;  // highest priority — obstacle avoidance
     double boundary = 10.0;
     double fence = 6.0;
-    double cluster = 12.0;  // topology order — lower than obstacle
+    // raised from 12.0 → 20.0 to resolving adjacent same-direction turn crossings.
+    double cluster = 20.0;  // topology order — lower than obstacle
     double crosswalk = 0.5;
 
     void update(double op, double bp, double fp, double cp) {

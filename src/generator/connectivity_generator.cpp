@@ -598,7 +598,10 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     cost.end_tan_dir = t1.norm() > 1e-8 ? t1.normalized() : Vec2d(1, 0);
     cost.full_param_mode = (initial.numSegments() > 1);
 
-    BezierCurve opt = optimiseCurve(cost, solver_, initial, /*outer_iters=*/5);
+    // raised outer_iters 5 → 7; with initial cluster weight 20.0 the
+    // ramp now reaches 96 within 4 iterations, giving 3 extra high-weight steps
+    // to resolve any residual adjacent-lane crossings.
+    BezierCurve opt = optimiseCurve(cost, solver_, initial, /*outer_iters=*/7);
 
     bool skip_band = true; // always skip: preserve G1, rely on optimizer
     BezierCurve final_c = postProcess(opt, sdf, input.area.geometry, 0.25, t0, t1, skip_band, &p0, &p1);
