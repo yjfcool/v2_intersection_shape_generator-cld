@@ -128,8 +128,34 @@ void ClusterOrderSolver::addPairsFromSortedCluster(
             p.id_b = sorted_ids[j];
             p.expected_side = +1;           // sorted[i] is LEFT of sorted[j]
             p.ref_perp = pairRefPerp(*ca, *cb, lanes);
-            if (!ca->exit_lane_id.empty() && ca->exit_lane_id == cb->exit_lane_id) {
-                p.exempt = CrossExemption::StructuralCross;
+
+            // ── Shared exit-lane handling ──────────────────────────────────────
+            if (!ca->exit_lane_id.empty() &&
+                ca->exit_lane_id == cb->exit_lane_id) {
+                if (ca->enterGroupId == cb->enterGroupId) {
+                    // Same entry group, same exit lane: ordering is still
+                    // meaningful throughout most of the path.  Use a LARGER
+                    // endpoint skip zone (25%) rather than marking StructuralCross.
+                    p.exempt = CrossExemption::None;
+                    p.shared_endpoint = true;
+                } else {
+                    // Different entry groups, same exit lane: paths come from
+                    // opposite sides and MUST cross → StructuralCross.
+                    p.exempt = CrossExemption::StructuralCross;
+                }
+                pairs_.push_back(p);
+                continue;
+            }
+
+            // ── Shared entry-lane handling ─────────────────────────────────────
+            // Two curves sharing the same ENTRY lane start from the same (x,y)
+            // with the same tangent direction.  The cluster constraint near the
+            // shared start would generate a near-zero gradient; use a wider skip
+            // zone so the ordering is only enforced in the diverged portion.
+            if (!ca->entry_lane_id.empty() &&
+                ca->entry_lane_id == cb->entry_lane_id) {
+                p.exempt = CrossExemption::None;
+                p.shared_endpoint = true;
             } else {
                 p.exempt = CrossExemption::None;
             }
@@ -139,17 +165,23 @@ void ClusterOrderSolver::addPairsFromSortedCluster(
 }
 
 // ─── Topological inversion detector ──────────────────────────────────────────
-// For entry-cluster pair (A,B):
-//   A left in entry = entry_rank_A < entry_rank_B → rank_diff < 0
-//   A left in exit  = exit_lat_A > exit_lat_B      → lat_diff  > 0
-//   Consistent: rank_diff*lat_diff < 0
-//   Inverted:   rank_diff*lat_diff > 0 → StructuralCross
 //
-// For exit-cluster cross-arm pair (A,B):
-//   A left in exit  = exit_rank_A < exit_rank_B    → rank_diff < 0
-//   A left in entry = entry_lat_A > entry_lat_B    → lat_diff  > 0
-//   Consistent: rank_diff*lat_diff < 0
-//   Inverted:   rank_diff*lat_diff > 0 → StructuralCross
+// ── Original logic (kept for non-U-turn same-arm pairs) ──────────────────────
+//   For entry-cluster pair (A,B):
+//     rank_diff = rank_A - rank_B  (sort: DESCENDING angle → rank 0 = most LEFT)
+//     lat_diff  = exit_lat_A - exit_lat_B  (in entry-arm perp frame)
+//     Consistent: rank_diff * lat_diff < 0  → no structural cross needed
+//     Inverted:   rank_diff * lat_diff > 0  → StructuralCross
+//
+//   For exit-cluster pair (A,B):
+//     rank_diff = rank_A - rank_B  (sort: DESCENDING entry_lat → rank 0 = most LEFT)
+//     lat_diff  = exit_lat_in_exit_group_A - exit_lat_in_exit_group_B
+//                 (exit endpoint projected onto exit-arm left-normal, relative to
+//                  mean exit point — INDEPENDENT of the sort key, unlike the old
+//                  entry_lat which is identical to the sort key and always gives a
+//                  negative product → StructuralCross never fired).
+//     Consistent: rank_diff * lat_diff < 0  → no structural cross needed
+//     Inverted:   rank_diff * lat_diff > 0  → StructuralCross
 void ClusterOrderSolver::detectTopologicalInversions(
         const std::vector<Connectivity> &conns) {
     constexpr double LAT_EPS = 0.3; // m — ignore near-equal laterals
@@ -164,6 +196,11 @@ void ClusterOrderSolver::detectTopologicalInversions(
         bool same_entry = (ca->enterGroupId == cb->enterGroupId);
         bool same_exit = (ca->exitGroupId == cb->exitGroupId);
 
+        // ── U-turn vs non-U-turn always produces a structural cross ──
+        // A U-turn arc (t0·t1 < -0.5) from the same entry/exit group as a
+        // non-U-turn curve MUST pass over that curve — mandatory structural cross.
+        // Original code used enterGroupId == exitGroupId which fails when the two
+        // group IDs differ even though the curve physically reverses direction.
         {
             bool a_ut = is_uturn_.count(pair.id_a) && is_uturn_.at(pair.id_a);
             bool b_ut = is_uturn_.count(pair.id_b) && is_uturn_.at(pair.id_b);
@@ -179,7 +216,37 @@ void ClusterOrderSolver::detectTopologicalInversions(
             if (ira == entry_cluster_rank_.end() || irb == entry_cluster_rank_.end()) continue;
             double rank_diff = (double)(ira->second - irb->second);
 
-            // opposite-side exit
+            // ── U-turn apex inversion ─────────────────────────────────────────
+            // For two U-turns from the same entry group, the apex height is
+            // proportional to Δlat = |entry_lat − exit_lat| (how much the curve
+            // must travel laterally to reach its exit).  When the MORE-RIGHT entry
+            // curve (higher rank) also has a LARGER Δlat, its apex swings higher,
+            // INVERTING the entry ordering at the apex → unavoidable structural
+            // cross.  Detect via rank_diff × dlat_diff > 0.
+            {
+                bool a_ut = is_uturn_.count(pair.id_a) && is_uturn_.at(pair.id_a);
+                bool b_ut = is_uturn_.count(pair.id_b) && is_uturn_.at(pair.id_b);
+                if (a_ut && b_ut) {
+                    auto iea = entry_lat_in_entry_ref_.find(pair.id_a);
+                    auto ieb = entry_lat_in_entry_ref_.find(pair.id_b);
+                    auto ixa = exit_lat_in_entry_ref_.find(pair.id_a);
+                    auto ixb = exit_lat_in_entry_ref_.find(pair.id_b);
+                    if (iea != entry_lat_in_entry_ref_.end() &&
+                        ieb != entry_lat_in_entry_ref_.end() &&
+                        ixa != exit_lat_in_entry_ref_.end() &&
+                        ixb != exit_lat_in_entry_ref_.end()) {
+                        double dlat_a = std::abs(ixa->second - iea->second);
+                        double dlat_b = std::abs(ixb->second - ieb->second);
+                        double dlat_diff = dlat_a - dlat_b;
+                        if (std::abs(dlat_diff) > LAT_EPS && rank_diff * dlat_diff > 0.0) {
+                            pair.exempt = CrossExemption::StructuralCross;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // ── opposite-side exit = always structural cross ──────────
             {
                 auto ixa = exit_lat_sign_.find(pair.id_a);
                 auto ixb = exit_lat_sign_.find(pair.id_b);
@@ -193,7 +260,13 @@ void ClusterOrderSolver::detectTopologicalInversions(
                     }
                 }
             }
-            // entry-exit lateral inversion
+
+            // ── entry-exit lateral inversion ───────────────────────────
+            // Catches cases where the within-arm lane ORDER at entry is INVERTED
+            // relative to lane order at exit (e.g. outer right turn from inner lane
+            // must cross inner right turn from outer lane; straight east vs right
+            // turn south from same west arm).
+            // Criterion: (entry_lat_A − entry_lat_B) × (exit_lat_A − exit_lat_B) < 0
             {
                 auto iea = entry_lat_in_entry_ref_.find(pair.id_a);
                 auto ieb = entry_lat_in_entry_ref_.find(pair.id_b);
@@ -381,6 +454,7 @@ void ClusterOrderSolver::build(
     }
 
     // Step 6: store ranks and lateral positions for topological inversion detection
+    // Also pre-compute U-turn flags via actual t0·t1 dot products.
     for (auto &kv:entry_group_order_) {
         auto &gid = kv.first;
         auto &cids = kv.second;
@@ -396,8 +470,13 @@ void ClusterOrderSolver::build(
             double elat = (exitEndpoint(xl) - me).dot(perp);
             exit_lat_in_entry_ref_[cids[i]] = elat;
             exit_lat_sign_[cids[i]] = elat; // raw value for sign comparison
+
+            // entry endpoint lateral within its own entry-group frame.
             const Lane *entl = findLane(lanes, c->entry_lane_id);
             entry_lat_in_entry_ref_[cids[i]] = (entryEndpoint(entl) - me).dot(perp);
+            // detect U-turns by t0·t1 dot product using actual lane tangents
+            // enterGroupId == exitGroupId check was wrong: physical U-turns can have
+            // different group IDs (one entry group, one exit group, same physical arm).
             Vec2d t0 = entryTangent(el);
             Vec2d t1 = exitTangent(xl);
             is_uturn_[cids[i]] = (t0.dot(t1) < -0.5);
@@ -408,6 +487,11 @@ void ClusterOrderSolver::build(
         auto &gid = kv.first;
         auto &cids = kv.second;
         Vec2d ealn = armLeftNormal(cids, conns, lanes, false);
+        // compute exit group's own reference for exit lateral positions.
+        // entry_lat_in_exit_ref_ is the SAME metric used for sorting → rank_diff and
+        // lat_diff always have opposite signs → StructuralCross never fires for same_exit.
+        // exit_lat_in_exit_group_ref_ uses the EXIT endpoint in the exit-arm frame,
+        // which is independent of the sort key and can reveal true geometric inversions.
         Vec2d exit_ref_pt = meanPt(cids, conns, lanes, false);
         for (int i = 0; i < (int) cids.size(); ++i) {
             exit_cluster_rank_[cids[i]] = i;

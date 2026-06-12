@@ -102,15 +102,6 @@ FenceRelaxResult tryRelaxFence(const Polygon2d& orig, const std::vector<Boundary
     if (orig.outer.empty())
         return {false, {}, 0};
     Polygon2d relaxed;
-    // Clipper2Lib::PathsD ps;
-    // Clipper2Lib::PathD p;
-    // for (auto& pt : orig.outer)
-    //     p.emplace_back(pt[0], pt.y());
-    // ps.push_back(p);
-    // auto inf = Clipper2Lib::InflatePaths(ps, mx, Clipper2Lib::JoinType::Round, Clipper2Lib::EndType::Polygon);
-    // if (inf.empty())
-    //     return {false, {}, 0};
-    // for (auto& pp : inf[0]) relaxed.outer.emplace_back(pp.x, pp.y);
     auto pths = ClipperUtil::InflatePaths({toArray(orig.outer)}, mx, ClipperLib::jtMiter, ClipperLib::etClosedPolygon);
     relaxed.outer = toArray(pths[0]);
     for (auto& bnd : edges) {

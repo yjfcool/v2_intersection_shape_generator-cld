@@ -13,6 +13,7 @@ struct SiblingCurve {
     double exempt_a2_radius = 0.0;   // >0 = obstacle forced (soft, 0.4× weight, NOT zero)
     int expected_side = 0;     // +1: sibling LEFT of current; -1: RIGHT; 0: unknown
     Vec2d ref_perp{0, 0};   // pair-specific fixed lateral axis
+    bool shared_endpoint = false; // shared exit lane (same entry group): wider skip zone
 };
 
 struct PenaltyWeights {
@@ -20,7 +21,9 @@ struct PenaltyWeights {
     double obstacle = 30.0;  // highest priority — obstacle avoidance
     double boundary = 10.0;
     double fence = 6.0;
-    double cluster = 12.0;  // topology order — lower than obstacle
+    // raised from 12.0 → 20.0 so the ramp reaches the 96 cap within
+    // fewer outer iterations, resolving adjacent same-direction turn crossings.
+    double cluster = 20.0;  // topology order — lower than obstacle
     double crosswalk = 0.5;
 
     void update(double op, double bp, double fp, double cp) {
@@ -42,6 +45,7 @@ struct PenaltyCostCache {
         double a2_radius;
         int expected_side;
         Vec2d ref_perp;
+        bool shared_endpoint = false; // wider skip zone near shared exit point
     };
 
     std::vector<BoundarySegment> bnd_segs;

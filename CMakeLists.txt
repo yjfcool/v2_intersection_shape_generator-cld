@@ -19,13 +19,6 @@ else()
     message(STATUS "Not found [DEPENDS_DIR=${DEPENDS_DIR}], using <FetchContent> fetch libriaries.")
     include(FetchContent)
 
-#    ## nlohmann_json
-#    message(STATUS "Start fetch libriary: nlohmann_json ...")
-#    FetchContent_Declare(nlohmann_json
-#            GIT_REPOSITORY https://github.com/nlohmann/json.git
-#            GIT_TAG        v3.11.3)
-#    FetchContent_MakeAvailable(nlohmann_json)
-
     ## eigen
     message(STATUS "Start fetch libriary: eigen ...")
     option(EIGEN_BUILD_DOC "Enable creation of Eigen documentation" OFF)
@@ -38,24 +31,11 @@ else()
             GIT_SHALLOW    TRUE)
     FetchContent_MakeAvailable(eigen)
 
-#    ## Clipper2
-#    message(STATUS "Start fetch libriary: Clipper2 ...")
-#    option(CLIPPER2_EXAMPLES "Build examples" OFF)
-#    option(CLIPPER2_TESTS "Build tests" OFF)
-#    option(USE_EXTERNAL_GTEST "Use system-wide installed GoogleTest" OFF)
-#    option(USE_EXTERNAL_GBENCHMARK "Use the googlebenchmark" OFF)
-#    FetchContent_Declare(
-#            Clipper2
-#            GIT_REPOSITORY https://github.com/AngusJohnson/Clipper2.git
-#            GIT_TAG        main
-#            SOURCE_SUBDIR  CPP  # change directory to CMakeLists.txt
-#            GIT_SHALLOW    TRUE)  # ver: main | Clipper2_1.4.0
-#    FetchContent_MakeAvailable(Clipper2)
 endif()
 
 
 add_subdirectory(src)
-option(INTERSECTION_BUILD_TESTS "Build project tests" OFF)
+option(INTERSECTION_BUILD_TESTS "Build project tests" ON)
 if(INTERSECTION_BUILD_TESTS)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
         add_subdirectory(tests)

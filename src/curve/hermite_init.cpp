@@ -620,27 +620,39 @@ BezierCurve buildTwoSegmentUTurn(
     double apex_forward = std::max(
         min_radius, std::max(lat_dist * 1.2, std::abs(forward_dist) + min_radius * 0.6));
 
-    // Apex position: midpoint of p0 and p1, extended along a "forward" direction.
+    // Apex position: midpoint of p0–p1, extended along the natural arc direction.
+    // ── forward_dir: restored to (T0–T1).normalized() ≈ T0 for anti-parallel ──
+    // Correct approach: keep forward_dir = T0, then LIFT the apex laterally to
+    // guarantee sufficient clearance from both endpoints, which both prevents
+    // control-polygon inversion AND produces a natural eastward arc.
     Vec2d base_mid = 0.5 * (p0 + p1);
-    Vec2d forward_dir;
-    double dot_t0_t1 = T0.dot(T1);
-    if (dot_t0_t1 < -0.85) {
-        // Nearly anti-parallel: use the lateral direction toward p1
-        forward_dir = perp_left;
-        if ((p1 - p0).dot(forward_dir) < 0) forward_dir = -forward_dir;
-        // apex_forward must clear both the lateral AND forward span of the chord
-        double chord = (p1 - p0).norm();
-        apex_forward = std::max(apex_forward,
-                                std::sqrt(chord * chord * 0.25 + forward_dist * forward_dist * 0.25)
-                                + min_radius * 0.5);
-    } else {
-        // General case: original formula
-        forward_dir = (T0 - T1); // sum of "forward" directions
-        if (forward_dir.norm() < 1e-8) forward_dir = T0;
-        forward_dir.normalize();
-    }
+    Vec2d forward_dir = (T0 - T1);
+    if (forward_dir.norm() < 1e-8) forward_dir = T0;
+    forward_dir.normalize();
 
     Vec2d apex = base_mid + forward_dir * apex_forward;
+
+    // ── Lateral lift: ensure apex clears both endpoints by ≥4 m ─────────────
+    // Even with forward_dir≈T0 the apex can be too close to p0/p1 in the
+    // lateral (perp_left) direction when lat_dist is small or p1 is far ahead.
+    // A low apex causes a right-turn kink in the control polygon → self-
+    // intersection or distorted shape.  Lift along perp_left until clear.
+    {
+        double p0_lat = p0.dot(perp_left);
+        double p1_lat = p1.dot(perp_left);
+        double apex_lat = apex.dot(perp_left);
+        if (lateral_offset >= 0) {
+            // left U-turn: apex must be above both endpoints
+            double required = std::max(p0_lat, p1_lat) + 4.0;
+            if (apex_lat < required)
+                apex += (required - apex_lat) * perp_left;
+        } else {
+            // right U-turn: apex must be below both endpoints
+            double required = std::min(p0_lat, p1_lat) - 4.0;
+            if (apex_lat > required)
+                apex += (required - apex_lat) * perp_left;
+        }
+    }
 
     // Try the preferred side; if SDF shows obstacle, try opposite
     if (sdf.valid()) {
@@ -656,34 +668,44 @@ BezierCurve buildTwoSegmentUTurn(
         }
     }
 
-    // Apex tangent: lateral direction at the top of the U-turn arc.
-    Vec2d apex_perp{-forward_dir[1], forward_dir[0]}; // left of forward
+    // Apex tangent: perpendicular to the forward direction, pointing laterally.
+    // For forward_dir ≈ T0 (east), apex_perp = left of T0 ≈ northward.
+    // This is the correct "top of arc" tangent for a left U-turn going east:
+    // the curve is momentarily going northward at the easternmost apex point.
+    Vec2d apex_perp{-forward_dir[1], forward_dir[0]}; // left of forward_dir
     double sign = (p1 - p0).dot(apex_perp);
-    Vec2d T_apex;
-    if (dot_t0_t1 < -0.85) {
-        // Anti-parallel fix: T_apex = T0 rotated 90° toward the turn side.
-        // For left U-turn: rotate T0 by -90° (CW) → points "across" the arc.
-        // Determine turn side from lateral_offset.
-        if (lateral_offset >= 0)
-            T_apex = Vec2d(T0[1], -T0[0]);  // CW rotation of T0 = right of T0
-        else
-            T_apex = Vec2d(-T0[1], T0[0]);  // CCW rotation = left of T0
-    } else {
-        T_apex = (sign >= 0) ? apex_perp : -apex_perp;
+    Vec2d T_apex = (sign >= 0) ? apex_perp : -apex_perp;
+
+    // ── Alpha-max clamp: prevent control-polygon inversion in seg0 ───────────
+    // The convexity constraint for seg0 gives an upper bound on alpha:
+    //   cross2d(T0, D0) − α·d0·cross2d(T0, T_apex) ≥ 0
+    //   → α ≤ cross2d(T0, D0) / (d0·cross2d(T0, T_apex))
+    // Without this clamp a large alpha makes ctrl[2] dip below p0 (or p1),
+    // causing a right-turn kink in the control polygon and self-intersection.
+    double alpha = 0.39;
+    {
+        Vec2d D0 = apex - p0;
+        double d0 = D0.norm();
+        double cross_uD0 = cross2d(T0, D0);
+        double cross_uv  = cross2d(T0, T_apex);
+        if (cross_uv > 1e-9 && d0 > 1e-9) {
+            double alpha_max0 = cross_uD0 / (d0 * cross_uv);
+            if (alpha_max0 > 0.0) alpha = std::min(alpha, alpha_max0 * 0.92);
+        }
+        // Also clamp for seg1: T_apex → T1 over chord apex→p1
+        Vec2d D1 = p1 - apex;
+        double d1 = D1.norm();
+        double cross_vD1 = cross2d(T_apex, D1);
+        double cross_vw  = cross2d(T_apex, T1);
+        if (cross_vw > 1e-9 && d1 > 1e-9) {
+            double alpha_max1 = cross_vD1 / (d1 * cross_vw);
+            if (alpha_max1 > 0.0) alpha = std::min(alpha, alpha_max1 * 0.92);
+        }
+        // Enforce minimum handle length
+        alpha = std::max(alpha, 0.05);
     }
 
     // Build the 2-segment G1 curve through {p0, apex, p1}
-    // Use alpha ≈ 0.39 which approximates a circular arc well for 90° turns
-    // (each segment turns ~90° for a total 180° U-turn)
-    double alpha = 0.39;
-
-    // Adjust alpha based on segment lengths for more balanced curvature
-    double len0 = (apex - p0).norm();
-    double len1 = (p1 - apex).norm();
-    double avg_len = 0.5 * (len0 + len1);
-    // For very elongated U-turns, slightly reduce alpha to prevent overshoot
-    if (avg_len > min_radius * 2.0) alpha = 0.35;
-
     return makeCurveFromKnots({p0, apex, p1}, {T0, T_apex, T1}, alpha);
 }
 

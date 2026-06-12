@@ -26,6 +26,7 @@ void PenaltyCostCache::rebuild(
         sp.a2_radius = sib.exempt_a2_radius;
         sp.expected_side = sib.expected_side;
         sp.ref_perp = sib.ref_perp;
+        sp.shared_endpoint = sib.shared_endpoint; // wider skip zone for convergent pairs
         sp.pts = sib.curve.sampleByArcLength(48); // 48pts for finer sign-change detection
         sib_polys.push_back(std::move(sp));
     }
@@ -97,7 +98,10 @@ double PenaltyCost::evalCluster(const BezierCurve& c) const {
     if (cache_.sib_polys.empty())return 0;
 
     constexpr double MARGIN = 0.3;   // m lateral separation
-    constexpr double SIGN_CHANGE_COST = 30.0;  // per-crossing base cost
+    // raised 30.0 → 50.0 — a detected sign-change (actual path crossing)
+    // now produces a much stronger gradient signal than a simple margin violation,
+    // driving the optimizer to uncross adjacent same-direction turns.
+    constexpr double SIGN_CHANGE_COST = 50.0;  // per-crossing base cost
     constexpr double OBS_REDUCE = 0.4;   // weight when obstacle forced (NOT zero)
     constexpr double MAX_DIST = 12.0;  // m nearest-point search radius
     constexpr double SKIP_FRAC = 0.07;  // skip first/last 7%
@@ -116,11 +120,17 @@ double PenaltyCost::evalCluster(const BezierCurve& c) const {
         int M = (int) sp.pts.size();
         if (M < 2 || sp.ref_perp.norm() < 1e-9)continue;
 
+        // For curves sharing the same exit endpoint (shared_endpoint=true) the
+        // constraint is meaningless at the convergence point.  Use a 25% skip
+        // zone so the penalty is only applied to the 50% central portion of the
+        // arc, well away from the shared endpoint.
+        double eff_skip = SKIP_FRAC; // double eff_skip = sp.shared_endpoint ? 0.25 : SKIP_FRAC;
+
         // Pre-compute nearest-sibling-point lateral diffs for all samples
         std::vector<double> diffs(N, std::numeric_limits<double>::quiet_NaN());
         for (int i = 0; i < N; ++i) {
             double frac = (double) i / std::max(N - 1, 1);
-            if (frac < SKIP_FRAC || frac > 1.0 - SKIP_FRAC)continue;
+            if (frac < eff_skip || frac > 1.0 - eff_skip)continue;
             Vec2d cp = curve_pts[i];
             // Find nearest sibling point within MAX_DIST
             double best_d2 = MAX_DIST * MAX_DIST + 1;
@@ -180,7 +190,7 @@ double PenaltyCost::evalCluster(const BezierCurve& c) const {
         constexpr double EP_TOL = 1.5; // endpoint exclusion tolerance (m)
         for (int ci = 0; ci + 1 < N; ++ci) {
             double frac_ci = (double) ci / std::max(N - 1, 1);
-            if (frac_ci < SKIP_FRAC || frac_ci > 1.0 - SKIP_FRAC)
+            if (frac_ci < eff_skip || frac_ci > 1.0 - eff_skip)
                 continue;
             Vec2d A0 = curve_pts[ci], A1 = curve_pts[ci + 1];
             Vec2d mid_A = 0.5 * (A0 + A1);

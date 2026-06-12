@@ -93,7 +93,6 @@ std::pair<Vec2d, Vec2d> IntersectionInput::exitPtDir(const LaneId& lid) const {
 // ─────────────────────────────────────────────────────────────────────────────
 //
 //
-// "排序时转向信息优先按方位计算为准,而不要强依赖输入数据中的ConnTurnType输入信息数据中转向类型不一定准确".
 // Compute turn type geometrically from endpoint tangents, not from conn.turn_type.
 //
 // Algorithm:
@@ -246,6 +245,9 @@ std::vector<SiblingCurve> ConnectivityGenerator::buildSiblings(
 
         // Fixed lateral reference for evalCluster
         s.ref_perp = cs.refPerpOf(id, cid);
+
+        // Propagate shared_endpoint flag so evalCluster uses wider skip zone
+        s.shared_endpoint = cs.isSharedEndpoint(id, cid);
 
         sibs.push_back(std::move(s));
     }
@@ -560,7 +562,10 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     cost.end_tan_dir = t1.norm() > 1e-8 ? t1.normalized() : Vec2d(1, 0);
     cost.full_param_mode = (initial.numSegments() > 1);
 
-    BezierCurve opt = optimiseCurve(cost, solver_, initial, /*outer_iters=*/5);
+    // FIX(conv): raised outer_iters 5 → 7; with initial cluster weight 20.0 the
+    // ramp now reaches 96 within 4 iterations, giving 3 extra high-weight steps
+    // to resolve any residual adjacent-lane crossings.
+    BezierCurve opt = optimiseCurve(cost, solver_, initial, /*outer_iters=*/7);
 
     bool skip_band = true; // always skip: preserve G1, rely on optimizer
     BezierCurve final_c = postProcess(opt, sdf, input.area.geometry, 0.25, t0, t1, skip_band, &p0, &p1);

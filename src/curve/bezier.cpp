@@ -149,6 +149,100 @@ std::vector<Vec2d> BezierSegment::sampleAdaptive(double maxAngleDeg, double maxS
     return pts;
 }
 
+// 形态自适应采样（根据曲率调整采样密度）
+std::vector<Vec2d> BezierSegment::sampleByShape(
+    double straightSpacing, double angularResolution, double minSpacing) const {
+    std::vector<Vec2d> pts;
+
+    // 首先检查是否近似为直线段
+    // 计算控制点形成的总弯曲角度
+    Vec2d v1 = (ctrl[1] - ctrl[0]).normalized();
+    Vec2d v2 = (ctrl[3] - ctrl[2]).normalized();
+    double straightAngle = angleBetween(v1, -v2);
+
+    // 如果几乎成一直线（接近180度），使用直线采样策略
+    if (std::abs(straightAngle - PI) < 0.1) { // 0.1 radian ≈ 5.7 degrees
+        // 对直线段使用固定间隔采样
+        double totalLength = arcLength(20); // 估算弧长
+        int nPoints = std::max(2, static_cast<int>(std::ceil(totalLength / straightSpacing)));
+
+        for (int i = 0; i < nPoints; i++) {
+            double t = static_cast<double>(i) / (nPoints - 1);
+            pts.push_back(evaluate(t));
+        }
+    } else {
+        // 对于弯曲段，采用更复杂的方法
+        pts.push_back(ctrl[0]); // 添加起点
+
+        double angularResRad = angularResolution * DEG2RAD;
+        int samples = 100; // 采样精度
+        double dt = 1.0 / samples;
+
+        Vec2d lastPt = evaluate(0.0);
+        double accumulatedLength = 0.0;
+
+        for (int i = 1; i <= samples; i++) {
+            double t = i * dt;
+            Vec2d currPt = evaluate(t);
+            double segmentLength = (currPt - lastPt).norm();
+
+            // 计算当前位置的曲率
+            double curvature = this->curvature(t);
+
+            double targetSpacing;
+            if (curvature < 0.01) { // 几乎是直线
+                targetSpacing = straightSpacing;
+            } else {
+                // 对弯曲部分：使用曲率半径和角度分辨率计算弧长间隔
+                double radius = 1.0 / curvature;
+                targetSpacing = radius * angularResRad;
+
+                // 不超过直线最大间距限制，且不低于最小间距
+                targetSpacing = std::min(targetSpacing, straightSpacing);
+                targetSpacing = std::max(targetSpacing, minSpacing);
+            }
+
+            // 如果累计长度达到目标间距，则添加点
+            accumulatedLength += segmentLength;
+            if (accumulatedLength >= targetSpacing) {
+                pts.push_back(currPt);
+                lastPt = currPt;
+                accumulatedLength = 0.0;
+            } else {
+                lastPt = currPt;
+            }
+        }
+    }
+
+    // 确保终点被包含且满足最小间距
+    if (pts.empty() || dist(pts.back(), ctrl[3]) > minSpacing * 0.5) { // 使用一半的最小间距作为容差
+        // 检查最后添加的点是否离终点太近，如果太近则替换为终点
+        if (!pts.empty() && dist(pts.back(), ctrl[3]) <= minSpacing) {
+            pts.back() = ctrl[3]; // 替换为精确终点
+        } else {
+            pts.push_back(ctrl[3]); // 添加新点
+        }
+    }
+
+    // 清理重复点（如果有的话）
+    std::vector<Vec2d> cleanedPts;
+    if (!pts.empty()) {
+        cleanedPts.push_back(pts[0]);
+        for (size_t i = 1; i < pts.size(); i++) {
+            if (dist(cleanedPts.back(), pts[i]) > minSpacing * 0.5) {
+                cleanedPts.push_back(pts[i]);
+            } else {
+                // 更新最后一个点为当前点（可能是终点），确保精度
+                if (i == pts.size() - 1) { // 如果是终点
+                    cleanedPts.back() = pts[i];
+                }
+            }
+        }
+    }
+
+    return cleanedPts;
+}
+
 // 获取 α（P1相对P0的标量，T0方向）
 double BezierSegment::getAlpha(const Vec2d& T0) const {
     double d = dist(ctrl[0], ctrl[3]);
@@ -236,6 +330,45 @@ std::vector<Vec2d> BezierCurve::sampleByArcLength(int n) const {
     while ((int)out.size() >= n) out.pop_back();
     out.push_back(endPt());
     return out;
+}
+
+std::vector<Vec2d> BezierCurve::sampleByShape(double straightSpacing, double angularResolution, double minSpacing) const {
+    if (segs.empty()) return {};
+
+    std::vector<Vec2d> result;
+
+    // 处理每个曲线段
+    for (size_t i = 0; i < segs.size(); ++i) {
+        const BezierSegment& seg = segs[i];
+
+        // 用形状自适应方法对当前段进行采样
+        std::vector<Vec2d> segSamples = seg.sampleByShape(straightSpacing, angularResolution, minSpacing);
+
+        // 如果是第一段，添加所有点；如果是后续段，跳过起点以避免重复
+        if (i == 0) {
+            result.insert(result.end(), segSamples.begin(), segSamples.end());
+        } else {
+            // 跳过重复的连接点
+            if (!segSamples.empty()) {
+                result.insert(result.end(), segSamples.begin() + 1, segSamples.end());
+            }
+        }
+    }
+
+    // 确保起点和终点都被包含（如果不在结果中的话）
+    if (result.empty()) {
+        result.push_back(startPt());
+        result.push_back(endPt());
+    } else {
+        if (dist(result.front(), startPt()) > minSpacing) {
+            result.insert(result.begin(), startPt());
+        }
+        if (dist(result.back(), endPt()) > minSpacing) {
+            result.push_back(endPt());
+        }
+    }
+
+    return result;
 }
 
 BoundingBox2d BezierCurve::bbox() const {
