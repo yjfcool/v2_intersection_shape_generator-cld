@@ -19,6 +19,41 @@ static const Lane *findLane(const std::vector<Lane> &ls, const LaneId &id) {
     return nullptr;
 }
 
+static void normalizeConnectivityGroups(std::vector<Connectivity> &conns,
+                                        const std::vector<Lane> &lanes,
+                                        const std::vector<LaneGroup> &laneGroups) {
+    std::unordered_map<LaneId, LaneGroupId> entry_gid;
+    std::unordered_map<LaneId, LaneGroupId> exit_gid;
+    for (auto &g : laneGroups) {
+        for (auto &lid : g.lanes) {
+            if (g.role == GroupRole::Entry)
+                entry_gid[lid] = g.id;
+            else
+                exit_gid[lid] = g.id;
+        }
+    }
+    for (auto &l : lanes) {
+        if (!l.groupId.empty()) {
+            if (!entry_gid.count(l.id))
+                entry_gid[l.id] = l.groupId;
+            if (!exit_gid.count(l.id))
+                exit_gid[l.id] = l.groupId;
+        }
+    }
+    for (auto &c : conns) {
+        if (c.enterGroupId.empty()) {
+            auto it = entry_gid.find(c.entry_lane_id);
+            if (it != entry_gid.end())
+                c.enterGroupId = it->second;
+        }
+        if (c.exitGroupId.empty()) {
+            auto it = exit_gid.find(c.exit_lane_id);
+            if (it != exit_gid.end())
+                c.exitGroupId = it->second;
+        }
+    }
+}
+
 static Vec2d entryEndpoint(const Lane *l) {
     if (!l || l->geometry.points.empty())return Vec2d(0, 0);
     return l->geometry.points.back();
@@ -132,17 +167,12 @@ void ClusterOrderSolver::addPairsFromSortedCluster(
             // ── Shared exit-lane handling ──────────────────────────────────────
             if (!ca->exit_lane_id.empty() &&
                 ca->exit_lane_id == cb->exit_lane_id) {
-                if (ca->enterGroupId == cb->enterGroupId) {
-                    // Same entry group, same exit lane: ordering is still
-                    // meaningful throughout most of the path.  Use a LARGER
-                    // endpoint skip zone (25%) rather than marking StructuralCross.
-                    p.exempt = CrossExemption::None;
-                    p.shared_endpoint = true;
-                } else {
-                    // Different entry groups, same exit lane: paths come from
-                    // opposite sides and MUST cross → StructuralCross.
-                    p.exempt = CrossExemption::StructuralCross;
-                }
+                // Shared exit lane means the curves are allowed to meet at the
+                // final endpoint only.  Treat it as a constrained merge with a
+                // wider endpoint skip zone; different entry groups do not make
+                // an interior crossing topologically mandatory.
+                p.exempt = CrossExemption::None;
+                p.shared_endpoint = true;
                 pairs_.push_back(p);
                 continue;
             }
@@ -196,55 +226,11 @@ void ClusterOrderSolver::detectTopologicalInversions(
         bool same_entry = (ca->enterGroupId == cb->enterGroupId);
         bool same_exit = (ca->exitGroupId == cb->exitGroupId);
 
-        // ── U-turn vs non-U-turn always produces a structural cross ──
-        // A U-turn arc (t0·t1 < -0.5) from the same entry/exit group as a
-        // non-U-turn curve MUST pass over that curve — mandatory structural cross.
-        // Original code used enterGroupId == exitGroupId which fails when the two
-        // group IDs differ even though the curve physically reverses direction.
-        {
-            bool a_ut = is_uturn_.count(pair.id_a) && is_uturn_.at(pair.id_a);
-            bool b_ut = is_uturn_.count(pair.id_b) && is_uturn_.at(pair.id_b);
-            if (a_ut != b_ut) {
-                pair.exempt = CrossExemption::StructuralCross;
-                continue;
-            }
-        }
-
         if (same_entry) {
             auto ira = entry_cluster_rank_.find(pair.id_a);
             auto irb = entry_cluster_rank_.find(pair.id_b);
             if (ira == entry_cluster_rank_.end() || irb == entry_cluster_rank_.end()) continue;
             double rank_diff = (double)(ira->second - irb->second);
-
-            // ── U-turn apex inversion ─────────────────────────────────────────
-            // For two U-turns from the same entry group, the apex height is
-            // proportional to Δlat = |entry_lat − exit_lat| (how much the curve
-            // must travel laterally to reach its exit).  When the MORE-RIGHT entry
-            // curve (higher rank) also has a LARGER Δlat, its apex swings higher,
-            // INVERTING the entry ordering at the apex → unavoidable structural
-            // cross.  Detect via rank_diff × dlat_diff > 0.
-            {
-                bool a_ut = is_uturn_.count(pair.id_a) && is_uturn_.at(pair.id_a);
-                bool b_ut = is_uturn_.count(pair.id_b) && is_uturn_.at(pair.id_b);
-                if (a_ut && b_ut) {
-                    auto iea = entry_lat_in_entry_ref_.find(pair.id_a);
-                    auto ieb = entry_lat_in_entry_ref_.find(pair.id_b);
-                    auto ixa = exit_lat_in_entry_ref_.find(pair.id_a);
-                    auto ixb = exit_lat_in_entry_ref_.find(pair.id_b);
-                    if (iea != entry_lat_in_entry_ref_.end() &&
-                        ieb != entry_lat_in_entry_ref_.end() &&
-                        ixa != exit_lat_in_entry_ref_.end() &&
-                        ixb != exit_lat_in_entry_ref_.end()) {
-                        double dlat_a = std::abs(ixa->second - iea->second);
-                        double dlat_b = std::abs(ixb->second - ieb->second);
-                        double dlat_diff = dlat_a - dlat_b;
-                        if (std::abs(dlat_diff) > LAT_EPS && rank_diff * dlat_diff > 0.0) {
-                            pair.exempt = CrossExemption::StructuralCross;
-                            continue;
-                        }
-                    }
-                }
-            }
 
             // ── opposite-side exit = always structural cross ──────────
             {
@@ -348,6 +334,9 @@ void ClusterOrderSolver::detectTopologicalInversions(
 void ClusterOrderSolver::build(
     const std::vector<Connectivity>& conns,
     const std::vector<Lane>& lanes, const std::vector<LaneGroup>& laneGroups) {
+    std::vector<Connectivity> norm_conns = conns;
+    normalizeConnectivityGroups(norm_conns, lanes, laneGroups);
+
     entry_group_order_.clear();
     exit_group_order_.clear();
     pairs_.clear();
@@ -361,7 +350,7 @@ void ClusterOrderSolver::build(
     exit_cluster_rank_.clear();
 
     // Step 1: group by enterGroupId / exitGroupId
-    for (auto& c : conns) {
+    for (auto& c : norm_conns) {
         if (!c.enterGroupId.empty())entry_group_order_[c.enterGroupId].push_back(c.id);
         if (!c.exitGroupId.empty())exit_group_order_[c.exitGroupId].push_back(c.id);
     }
@@ -373,10 +362,10 @@ void ClusterOrderSolver::build(
         auto &gid = kv.first;
         auto &cids = kv.second;
         if (cids.size() < 2)continue;
-        Vec2d perp = armLeftNormal(cids, conns, lanes, false);
-        Vec2d ref = meanPt(cids, conns, lanes, false);
+        Vec2d perp = armLeftNormal(cids, norm_conns, lanes, false);
+        Vec2d ref = meanPt(cids, norm_conns, lanes, false);
         for (auto &cid:cids) {
-            auto *c = findConn(conns, cid);
+            auto *c = findConn(norm_conns, cid);
             if (!c)continue;
             const Lane *xl = findLane(lanes, c->exit_lane_id);
             exit_lane_lat_in_group[c->exit_lane_id] = (exitEndpoint(xl) - ref).dot(perp);
@@ -389,10 +378,10 @@ void ClusterOrderSolver::build(
         auto &gid = kv.first;
         auto &cids = kv.second;
         if (cids.size() < 2)continue;
-        Vec2d perp = armLeftNormal(cids, conns, lanes, true);
-        Vec2d ref = meanPt(cids, conns, lanes, true);
+        Vec2d perp = armLeftNormal(cids, norm_conns, lanes, true);
+        Vec2d ref = meanPt(cids, norm_conns, lanes, true);
         for (auto &cid:cids) {
-            auto *c = findConn(conns, cid);
+            auto *c = findConn(norm_conns, cid);
             if (!c)continue;
             const Lane *el = findLane(lanes, c->entry_lane_id);
             entry_lane_lat_in_group[c->entry_lane_id] = (entryEndpoint(el) - ref).dot(perp);
@@ -407,10 +396,10 @@ void ClusterOrderSolver::build(
         auto &gid = kv.first;
         auto &cids = kv.second;
         if (cids.size() < 2)continue;
-        Vec2d me = meanPt(cids, conns, lanes, true);
+        Vec2d me = meanPt(cids, norm_conns, lanes, true);
         std::stable_sort(cids.begin(), cids.end(), [&](const ConnId &a, const ConnId &b) {
-            auto *ca = findConn(conns, a);
-            auto *cb = findConn(conns, b);
+            auto *ca = findConn(norm_conns, a);
+            auto *cb = findConn(norm_conns, b);
             if (!ca || !cb)return false;
             double ang_a = entryAngle(*ca, me, lanes);
             double ang_b = entryAngle(*cb, me, lanes);
@@ -437,10 +426,10 @@ void ClusterOrderSolver::build(
         auto &gid = kv.first;
         auto &cids = kv.second;
         if (cids.size() < 2)continue;
-        Vec2d ealn = armLeftNormal(cids, conns, lanes, false);
+        Vec2d ealn = armLeftNormal(cids, norm_conns, lanes, false);
         std::stable_sort(cids.begin(), cids.end(), [&](const ConnId &a, const ConnId &b) {
-            auto *ca = findConn(conns, a);
-            auto *cb = findConn(conns, b);
+            auto *ca = findConn(norm_conns, a);
+            auto *cb = findConn(norm_conns, b);
             if (!ca || !cb)return false;
             double la = exitEntryLat(*ca, ealn, lanes);
             double lb = exitEntryLat(*cb, ealn, lanes);
@@ -458,11 +447,11 @@ void ClusterOrderSolver::build(
     for (auto &kv:entry_group_order_) {
         auto &gid = kv.first;
         auto &cids = kv.second;
-        Vec2d me = meanPt(cids, conns, lanes, true);
-        Vec2d perp = armLeftNormal(cids, conns, lanes, true);
+        Vec2d me = meanPt(cids, norm_conns, lanes, true);
+        Vec2d perp = armLeftNormal(cids, norm_conns, lanes, true);
         for (int i = 0; i < (int) cids.size(); ++i) {
             entry_cluster_rank_[cids[i]] = i;
-            auto *c = findConn(conns, cids[i]);
+            auto *c = findConn(norm_conns, cids[i]);
             if (!c)continue;
             const Lane *el = findLane(lanes, c->entry_lane_id);
             const Lane *xl = findLane(lanes, c->exit_lane_id);
@@ -486,16 +475,16 @@ void ClusterOrderSolver::build(
     for (auto &kv:exit_group_order_) {
         auto &gid = kv.first;
         auto &cids = kv.second;
-        Vec2d ealn = armLeftNormal(cids, conns, lanes, false);
+        Vec2d ealn = armLeftNormal(cids, norm_conns, lanes, false);
         // compute exit group's own reference for exit lateral positions.
         // entry_lat_in_exit_ref_ is the SAME metric used for sorting → rank_diff and
         // lat_diff always have opposite signs → StructuralCross never fires for same_exit.
         // exit_lat_in_exit_group_ref_ uses the EXIT endpoint in the exit-arm frame,
         // which is independent of the sort key and can reveal true geometric inversions.
-        Vec2d exit_ref_pt = meanPt(cids, conns, lanes, false);
+        Vec2d exit_ref_pt = meanPt(cids, norm_conns, lanes, false);
         for (int i = 0; i < (int) cids.size(); ++i) {
             exit_cluster_rank_[cids[i]] = i;
-            auto *c = findConn(conns, cids[i]);
+            auto *c = findConn(norm_conns, cids[i]);
             if (!c)continue;
             const Lane *el = findLane(lanes, c->entry_lane_id);
             const Lane *xl = findLane(lanes, c->exit_lane_id);
@@ -516,7 +505,7 @@ void ClusterOrderSolver::build(
     for (auto &kv:entry_group_order_) {
         auto &gid = kv.first;
         auto &cids = kv.second;
-        if (cids.size() > 1)addPairsFromSortedCluster(cids, conns, lanes);
+        if (cids.size() > 1)addPairsFromSortedCluster(cids, norm_conns, lanes);
     }
 
     // Step 8: build constraint pairs from exit clusters (new pairs only)
@@ -524,12 +513,12 @@ void ClusterOrderSolver::build(
         auto &gid = kv.first;
         auto &cids = kv.second;
         if (cids.size() > 1) {
-            addPairsFromSortedCluster(cids, conns, lanes);
+            addPairsFromSortedCluster(cids, norm_conns, lanes);
         }
     }
 
     // Step 9: detect and mark true topological inversions as StructuralCross
-    detectTopologicalInversions(conns);
+    detectTopologicalInversions(norm_conns);
 }
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
@@ -571,13 +560,17 @@ void ClusterOrderSolver::markObstacleExempt(CurvePair &pair, const Vec2d &pt,
 
 void ClusterOrderSolver::checkAndMarkA2(
     const std::unordered_map<ConnId, BezierCurve>& curves, const SDFField& sdf, double r) {
+    if (!sdf.valid())
+        return;
     for (auto& pair : pairs_) {
         if (pair.exempt != CrossExemption::None)
             continue;
         auto ia = curves.find(pair.id_a), ib = curves.find(pair.id_b);
         if (ia == curves.end() || ib == curves.end())
             continue;
-        for (auto& pt : curveCrossings(ia->second, ib->second))
+        if (!curvesIntersectBusiness(ia->second, ib->second, 1.5))
+            continue;
+        for (auto& pt : curveCrossings(ia->second, ib->second, 0.3))
             markObstacleExempt(pair, pt, sdf, r);
     }
 }

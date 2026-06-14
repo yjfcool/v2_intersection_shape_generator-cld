@@ -118,13 +118,13 @@ double PenaltyCost::evalCluster(const BezierCurve& c) const {
 
         double w = (sp.a2_radius > 0) ? OBS_REDUCE : 1.0; // reduced but NOT zero for obstacle
         int M = (int) sp.pts.size();
-        if (M < 2 || sp.ref_perp.norm() < 1e-9)continue;
+        if (M < 2 || sp.ref_perp.norm() < 1e-9 || sp.expected_side == 0)continue;
 
         // For curves sharing the same exit endpoint (shared_endpoint=true) the
         // constraint is meaningless at the convergence point.  Use a 25% skip
         // zone so the penalty is only applied to the 50% central portion of the
         // arc, well away from the shared endpoint.
-        double eff_skip = SKIP_FRAC; // double eff_skip = sp.shared_endpoint ? 0.25 : SKIP_FRAC;
+        double eff_skip = sp.shared_endpoint ? 0.18 : SKIP_FRAC;
 
         // Pre-compute nearest-sibling-point lateral diffs for all samples
         std::vector<double> diffs(N, std::numeric_limits<double>::quiet_NaN());
@@ -202,10 +202,13 @@ double PenaltyCost::evalCluster(const BezierCurve& c) const {
                 Vec2d isect;
                 if (!segmentsIntersect(A0, A1, B0, B1, &isect))
                     continue;
-                // Skip if crossing is within endpoint zone of CURRENT curve
+                // Skip if crossing is within endpoint zones of either curve.
                 double d_start = (isect - curve_pts.front()).norm();
                 double d_end = (isect - curve_pts.back()).norm();
-                if (d_start < EP_TOL || d_end < EP_TOL)continue;
+                double d_sib_start = (isect - sp.pts.front()).norm();
+                double d_sib_end = (isect - sp.pts.back()).norm();
+                if (d_start < EP_TOL || d_end < EP_TOL ||
+                    d_sib_start < EP_TOL || d_sib_end < EP_TOL)continue;
                 // Crossing depth = lateral separation just before crossing
                 // Use ref_perp projection difference at A0 vs nearest B point
                 Vec2d near_B = B0;
@@ -426,6 +429,15 @@ BezierCurve optimiseCurve(
     cost.buildCache();
     VecXd params = cost.full_param_mode ? curveToParamsFull(initial) : curveToParams(initial);
     for (int outer = 0; outer < outer_iters; ++outer) {
+        BezierCurve current = cost.full_param_mode ?
+                              curveFromParamsFull(params, cost.proto) : curveFromParams(params, cost.proto);
+        double op0 = cost.evalObstacle(current);
+        double bp0 = cost.evalBoundary(current);
+        double fp0 = cost.evalFence(current);
+        double cp0 = cost.evalCluster(current);
+        if (op0 + bp0 + fp0 + cp0 < 1e-6)
+            break;
+
         auto res = solver.solve([&](const VecXd& p, VecXd& g) { return cost(p, g); }, params);
         params = res.x;
         BezierCurve c = cost.full_param_mode ?

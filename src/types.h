@@ -204,7 +204,7 @@ struct Crosswalk {
 struct IntersectionArea {
     InterId id;
     Polygon2d geometry;
-    bool is_rough; //true:粗糙路口面，false:精细路口面
+    bool is_rough = false; //true:粗糙路口面，false:精细路口面
 };
 
 enum class CurveStatus { OK, WarnA2, Degraded, Infeasible };
@@ -283,10 +283,10 @@ struct IntersectionInput {
 struct SDFField; // forward
 
 struct LBFGSConfig {
-    int max_iter = 200; // reduced: good init+analytic grad converges faster
+    int max_iter = 80;
     int history_size = 10;
-    int max_ls_iter = 20;
-    double grad_tol = 1e-4; // loosened: curve quality doesn't need 1e-5
+    int max_ls_iter = 10;
+    double grad_tol = 5e-4;
     double func_tol = 1e-7;
     double wolfe_c1 = 1e-4;
     double wolfe_c2 = 0.9;

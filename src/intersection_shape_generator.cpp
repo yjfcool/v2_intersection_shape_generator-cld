@@ -6,12 +6,55 @@
 #include "generator/polygon_builder.h"
 #include <chrono>
 #include <cmath>
+#include <unordered_map>
 namespace isg {
 
 IntersectionShapeGenerator::IntersectionShapeGenerator(): cfg_{} {
 }
 
 IntersectionShapeGenerator::IntersectionShapeGenerator(const Config& cfg): cfg_(cfg) {
+}
+
+static IntersectionInput normalizeConnectivityGroups(IntersectionInput input) {
+    std::unordered_map<LaneId, LaneGroupId> entry_gid;
+    std::unordered_map<LaneId, LaneGroupId> exit_gid;
+    for (auto& g : input.lane_groups) {
+        for (auto& lid : g.lanes) {
+            if (g.role == GroupRole::Entry)
+                entry_gid[lid] = g.id;
+            else
+                exit_gid[lid] = g.id;
+        }
+    }
+    for (auto& l : input.lanes) {
+        auto ie = entry_gid.find(l.id);
+        auto ix = exit_gid.find(l.id);
+        if (l.groupId.empty()) {
+            if (ie != entry_gid.end())
+                l.groupId = ie->second;
+            else if (ix != exit_gid.end())
+                l.groupId = ix->second;
+        }
+        if (!l.groupId.empty()) {
+            if (!entry_gid.count(l.id))
+                entry_gid[l.id] = l.groupId;
+            if (!exit_gid.count(l.id))
+                exit_gid[l.id] = l.groupId;
+        }
+    }
+    for (auto& c : input.connectivities) {
+        if (c.enterGroupId.empty()) {
+            auto it = entry_gid.find(c.entry_lane_id);
+            if (it != entry_gid.end())
+                c.enterGroupId = it->second;
+        }
+        if (c.exitGroupId.empty()) {
+            auto it = exit_gid.find(c.exit_lane_id);
+            if (it != exit_gid.end())
+                c.exitGroupId = it->second;
+        }
+    }
+    return input;
 }
 
 inline const char* turnTypeName(ConnTurnType t) {
@@ -68,41 +111,43 @@ ValidationReport validateTopology(const IntersectionInput& input) {
 }
 
 bool IntersectionShapeGenerator::generate(const IntersectionInput& input, IntersectionOutput& output) {
-    report_ = validateTopology(input);
+    IntersectionInput norm_input = normalizeConnectivityGroups(input);
+    report_ = validateTopology(norm_input);
     if (!report_.is_valid())
         return false;
 
     auto t0 = std::chrono::steady_clock::now();
     SDFField sdf;
     BoundingBox2d roi;
-    if (!input.area.geometry.outer.empty())
-        roi = input.area.geometry.bbox();
+    if (!norm_input.area.geometry.outer.empty())
+        roi = norm_input.area.geometry.bbox();
     else {
-        for (auto& l : input.lanes) {
+        for (auto& l : norm_input.lanes) {
             for (auto& p : l.geometry.points)
                 roi.expand(p);
         }
         roi.min_pt -= Vec2d(20, 20);
         roi.max_pt += Vec2d(20, 20);
     }
-    sdf.build(roi, input.obstacles, cfg_.sdf_cell_size, cfg_.obstacle_buffer);
+    if (!norm_input.obstacles.empty())
+        sdf.build(roi, norm_input.obstacles, cfg_.sdf_cell_size, cfg_.obstacle_buffer);
     output.perf.sdf_build_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
     double opt_ms = 0;
     ConnectivityGenerator cgen(cfg_.lbfgs);
-    output.connectivity_curves = cgen.generate(input, sdf, &opt_ms);
+    output.connectivity_curves = cgen.generate(norm_input, sdf, &opt_ms);
     output.perf.optimize_ms = opt_ms;
 
     auto te = std::chrono::steady_clock::now();
     EdgeLineGenerator elgen;
-    output.lane_edges = elgen.generate(input, output.connectivity_curves);
+    output.lane_edges = elgen.generate(norm_input, output.connectivity_curves);
     output.perf.edge_gen_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - te).count();
 
     auto ta = std::chrono::steady_clock::now();
     IntersectionAreaBuilder areabuilder;
-    output.area = areabuilder.build(input, output.connectivity_curves, output.lane_edges);
+    output.area = areabuilder.build(norm_input, output.connectivity_curves, output.lane_edges);
     output.perf.area_gen_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
     return true;

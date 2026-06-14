@@ -397,6 +397,57 @@ BezierSegment makeCubicG1(const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, con
     return s;
 }
 
+BezierSegment makeAlignedUTurnCubic(
+    const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
+    double handle_scale, double handle_bias) {
+    Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
+    Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : -T0;
+
+    Vec2d exit_back = -T1;
+    Vec2d axis = T0 + exit_back;
+    if (axis.norm() < 1e-8)
+        axis = T0;
+    axis.normalize();
+    if (axis.dot(T0) < 0.0)
+        axis = -axis;
+
+    double s0 = p0.dot(axis);
+    double s1 = p1.dot(axis);
+    double common_s = std::max(s0, s1);
+
+    double c0 = std::max(0.2, T0.dot(axis));
+    double c1 = std::max(0.2, exit_back.dot(axis));
+    double lead0 = std::max(0.0, (common_s - s0) / c0);
+    double lead1 = std::max(0.0, (common_s - s1) / c1);
+
+    Vec2d q0 = p0 + lead0 * T0;
+    Vec2d q1 = p1 + lead1 * exit_back;
+    Vec2d sep = q1 - q0;
+    Vec2d lateral = sep - sep.dot(axis) * axis;
+    double turn_gap = lateral.norm();
+    if (turn_gap < 1e-6) {
+        Vec2d perp{-axis[1], axis[0]};
+        turn_gap = std::abs((p1 - p0).dot(perp));
+    }
+    turn_gap = std::max(turn_gap, 0.15);
+
+    double gap_scale = 1.0;
+    if (turn_gap > 5.0) {
+        double u = std::min(1.0, (turn_gap - 5.0) / 9.0);
+        gap_scale += 0.50 * (u * u * (3.0 - 2.0 * u));
+    }
+    double scale = std::max(0.15, handle_scale * gap_scale);
+    double arc_handle = (2.0 / 3.0) * turn_gap * scale + handle_bias;
+    arc_handle = std::max(0.05, arc_handle);
+
+    BezierSegment s;
+    s.ctrl[0] = p0;
+    s.ctrl[1] = p0 + (lead0 + arc_handle) * T0;
+    s.ctrl[2] = p1 - (lead1 + arc_handle) * T1;
+    s.ctrl[3] = p1;
+    return s;
+}
+
 BezierCurve makeCurveFromKnots(const std::vector<Vec2d>& pts, const std::vector<Vec2d>& tans, double alpha) {
     assert(pts.size()==tans.size()&&pts.size()>=2);
     BezierCurve c;

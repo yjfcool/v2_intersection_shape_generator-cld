@@ -10,6 +10,10 @@ struct SDFField;
 // ── Free functions ───────────────────────────────────────────
 BezierSegment makeCubicG1(const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1, double alpha = 0.33);
 
+BezierSegment makeAlignedUTurnCubic(
+    const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
+    double handle_scale = 1.0, double handle_bias = 0.0);
+
 BezierCurve makeCurveFromKnots(const std::vector<Vec2d>& pts, const std::vector<Vec2d>& tans, double alpha = 0.33);
 
 BezierCurve fitBezierWithEndTangents(const std::vector<Vec2d>& pts, const Vec2d& start_tan, const Vec2d& end_tan);

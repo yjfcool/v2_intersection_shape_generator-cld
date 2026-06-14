@@ -5,6 +5,7 @@
 
 #include "types.h"
 #include "curve/bezier.h"
+#include "utils.h"
 
 namespace isg {
 
@@ -392,11 +393,10 @@ private:
         Vec2d startPt, endPt;
         if (isLeft) {
             startPt = findEdgePtInGroup(conn->entry_lane_id, true, enterGrpId, inp, hw, true);
-            // Exit: exit tangent points inward, so left from exit perspective = right from curve perspective (flipped)
-            endPt = findEdgePtInGroup(conn->exit_lane_id, false, exitGrpId, inp, hw, false);
+            endPt = findEdgePtInGroup(conn->exit_lane_id, true, exitGrpId, inp, hw, false);
         } else {
             startPt = findEdgePtInGroup(conn->entry_lane_id, false, enterGrpId, inp, hw, true);
-            endPt = findEdgePtInGroup(conn->exit_lane_id, true, exitGrpId, inp, hw, false);
+            endPt = findEdgePtInGroup(conn->exit_lane_id, false, exitGrpId, inp, hw, false);
         }
         Vec2d enterTang = getEdgeTangent(conn->entry_lane_id, inp, true);
         Vec2d exitTang = getEdgeTangent(conn->exit_lane_id, inp, false);
@@ -556,7 +556,7 @@ private:
                 }
                 double alpha = 0.38;
                 Vec2d p1 = p0 + t0 * (alpha * d);
-                Vec2d p2 = p3 + endTang * (alpha * d);
+                Vec2d p2 = p3 - endTang * (alpha * d);
                 BezierSegment cb;
                 cb.ctrl = {p0, p1, p2, p3};
                 int count = n - 1 - startIdx;
@@ -587,7 +587,7 @@ private:
         for (auto& eid : grp.boundaries) {
             auto elit = inp.findEdge(eid);
             if (!elit) continue;
-            if (!elit->geometry.points.empty()) continue;
+            if (elit->geometry.points.empty()) continue;
             const Vec2d& ep = getConnPoint(elit->geometry.points, is_entryline); //elit->connectionPt;
             double lateral = (ep - clPt).dot(normal);
             if (isLeft && lateral > 0.01 && lateral < 10.0) {
@@ -619,7 +619,7 @@ private:
             for (auto& eid : git->boundaries) {
                 auto elit = inp.findEdge(eid);
                 if (!elit) continue;
-                if (!elit->geometry.points.empty()) continue;
+                if (elit->geometry.points.empty()) continue;
                 const Vec2d& ep = getConnPoint(elit->geometry.points, is_entryline); //elit->connectionPt;
                 double lat = (ep - clPt).dot(normal);
                 if (isLeft && lat > 0.01 && std::abs(lat - hw) < hw * 0.8) return ep;

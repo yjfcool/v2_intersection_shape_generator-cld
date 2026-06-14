@@ -4,6 +4,8 @@
 #include "curve/curve_utils.h"
 #include "optimizer/sdf_field.h"
 #include "curve/bezier.h"
+#include "curve/hermite_init.h"
+#include "utils.h"
 
 using namespace isg;
 
@@ -82,7 +84,7 @@ TEST_CASE("ClusterOrderSolver: Straight before Left in order", "[cluster]") {
     REQUIRE(ex == CrossExemption::None);
 }
 
-TEST_CASE("ClusterOrderSolver: UTurn pair is structurally exempt", "[cluster]") {
+TEST_CASE("ClusterOrderSolver: UTurn pair remains constrained in same cluster", "[cluster]") {
     IntersectionInput inp = makeSimpleInput();
     Connectivity cu; cu.id="CU"; cu.entry_lane_id="L1";
                      cu.exit_lane_id="R1"; cu.turn_type=ConnTurnType::UTurnLeft;
@@ -91,9 +93,65 @@ TEST_CASE("ClusterOrderSolver: UTurn pair is structurally exempt", "[cluster]") 
     ClusterOrderSolver cs;
     cs.build(inp.connectivities, inp.lanes, inp.lane_groups);
 
-    // C1 (Straight) vs CU (UTurnLeft) → structural exemption
+    // U-turns are not automatically a logical crossing. They still need the
+    // same-cluster non-endpoint intersection constraint.
     auto ex = cs.exemptionOf("C1","CU");
-    REQUIRE(ex == CrossExemption::StructuralCross);
+    REQUIRE(ex == CrossExemption::None);
+}
+
+TEST_CASE("UTurn initializer keeps a compact non-self-intersecting arc", "[uturn][geometry]") {
+    SDFField sdf;
+    Polygon2d fence;
+    Vec2d p0(1.75, -10.0);
+    Vec2d t0(0.0, 1.0);
+    Vec2d p1(-1.75, -10.0);
+    Vec2d t1(0.0, -1.0);
+
+    BezierCurve c = buildTwoSegmentUTurn(p0, t0, p1, t1, sdf, fence);
+    REQUIRE(c.numSegments() == 1);
+    REQUIRE_FALSE(curveSelfIntersectsBusiness(c, 1.0));
+    REQUIRE(c.startTan().dot(t0.normalized()) > 0.999);
+    REQUIRE(c.endTan().dot(t1.normalized()) > 0.999);
+
+    auto pts = c.sampleByArcLength(40);
+    double max_abs_x = 0.0;
+    double max_y = -1e18;
+    for (auto& p : pts) {
+        max_abs_x = std::max(max_abs_x, std::abs(p.x()));
+        max_y = std::max(max_y, p.y());
+    }
+    REQUIRE(max_abs_x < 3.2);
+    REQUIRE(max_y > -8.4);
+
+    int sign = 0;
+    int slope_sign = 0;
+    int extrema = 0;
+    double prev_forward = (c.segs.front().evaluate(0.0) - p0).dot(t0.normalized());
+    for (int i = 0; i <= 40; ++i) {
+        double u = i / 40.0;
+        Vec2d d1 = c.segs.front().evalDeriv1(u);
+        Vec2d d2 = c.segs.front().evalDeriv2(u);
+        double signed_k = cross2d(d1, d2);
+        if (std::abs(signed_k) > 1e-7) {
+            int cur_sign = signed_k > 0.0 ? 1 : -1;
+            if (sign == 0)
+                sign = cur_sign;
+            REQUIRE(cur_sign == sign);
+        }
+
+        double forward = (c.segs.front().evaluate(u) - p0).dot(t0.normalized());
+        if (i > 0) {
+            double df = forward - prev_forward;
+            int cur_slope = df > 1e-5 ? 1 : (df < -1e-5 ? -1 : 0);
+            if (cur_slope != 0) {
+                if (slope_sign != 0 && cur_slope != slope_sign)
+                    ++extrema;
+                slope_sign = cur_slope;
+            }
+        }
+        prev_forward = forward;
+    }
+    REQUIRE(extrema <= 1);
 }
 
 TEST_CASE("curveCrossings detects intersection", "[intersection_check]") {

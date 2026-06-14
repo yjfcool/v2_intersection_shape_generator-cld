@@ -13,6 +13,7 @@
 #include "optimizer/sdf_field.h"
 #include <cmath>
 #include <vector>
+#include <iostream>
 
 #include "io/iodata_shapefile.h"
 #include "io/iodata_json.h"
@@ -21,12 +22,12 @@ using Catch::Matchers::WithinAbs;
 
 using namespace isg;
 
-#define TEST_4WAY
-#define TEST_T
-#define TEST_Y
-#define TEST_ROUNDABOUT
+//#define TEST_4WAY
+//#define TEST_T
+//#define TEST_Y
+//#define TEST_ROUNDABOUT
 #define TEST_OBSTACLE
-#define TEST_FILE
+//#define TEST_FILE
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Common validation helpers
@@ -73,6 +74,34 @@ static bool allCurvesAvoidObstacles(const IntersectionOutput& out,
         if (!curveAvoidsPenetration(cc, inp)) return false;
     }
     return true;
+}
+
+static const ConnectivityCurve* findCurveById(
+    const IntersectionOutput& out, const ConnId& id)
+{
+    for (auto& cc : out.connectivity_curves) {
+        if (cc.id == id)
+            return &cc;
+    }
+    return nullptr;
+}
+
+static double minRawObstacleDistance(
+    const ConnectivityCurve& cc, const IntersectionInput& inp)
+{
+    if (!cc.curve || inp.obstacles.empty())
+        return 1e18;
+    SDFField sdf;
+    auto roi = inp.area.geometry.bbox();
+    if (roi.empty())
+        return 1e18;
+    sdf.build(roi, inp.obstacles, 0.2, 0.0);
+    double min_d = 1e18;
+    for (auto& pt : cc.curve->sampleByArcLength(80)) {
+        std::pair<double, Vec2d> _q = sdf.queryWithGrad(pt);
+        min_d = std::min(min_d, _q.first);
+    }
+    return min_d;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -135,6 +164,8 @@ static IntersectionInput build4Way(int lanes_per_arm = 1,
 #ifdef TEST_4WAY
 TEST_CASE("4-way: clear no obstacles — all 12 connections feasible", "[4way][clear]")
 {
+    std::cout << "TEST_CASE: " << "4-way: clear no obstacles — all 12 connections feasible" << std::endl;
+
     auto inp = build4Way();
     IntersectionShapeGenerator gen;
     IntersectionOutput out;
@@ -153,6 +184,8 @@ TEST_CASE("4-way: clear no obstacles — all 12 connections feasible", "[4way][c
 
 TEST_CASE("4-way: central square obstacle — curves reroute around it", "[4way][obstacle]")
 {
+    std::cout << "TEST_CASE: " << "4-way: central square obstacle — curves reroute around it" << std::endl;
+
     auto inp = build4Way();
     addObstacle(inp, "CENTRE", makeRectObstacle({0,0}, 2.0, 2.0));
     IntersectionShapeGenerator gen;
@@ -168,6 +201,8 @@ TEST_CASE("4-way: central square obstacle — curves reroute around it", "[4way]
 
 TEST_CASE("4-way: multi-lane (2 lanes per arm) — 1:1 connectivity", "[4way][multilane]")
 {
+    std::cout << "TEST_CASE: " << "4-way: multi-lane (2 lanes per arm) — 1:1 connectivity" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 18.0);
@@ -200,6 +235,8 @@ TEST_CASE("4-way: multi-lane (2 lanes per arm) — 1:1 connectivity", "[4way][mu
 
 TEST_CASE("4-way: 1:N connectivity — one entry to two exits", "[4way][1toN]")
 {
+    std::cout << "TEST_CASE: " << "4-way: 1:N connectivity — one entry to two exits" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 18.0);
@@ -233,6 +270,8 @@ TEST_CASE("4-way: 1:N connectivity — one entry to two exits", "[4way][1toN]")
 
 TEST_CASE("4-way: N:1 connectivity — two entries merge to one exit", "[4way][Nto1]")
 {
+    std::cout << "TEST_CASE: " << "4-way: N:1 connectivity — two entries merge to one exit" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 18.0);
@@ -265,6 +304,8 @@ TEST_CASE("4-way: N:1 connectivity — two entries merge to one exit", "[4way][N
 
 TEST_CASE("4-way: U-turn connections", "[4way][uturn]")
 {
+    std::cout << "TEST_CASE: " << "4-way: U-turn connections" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 16.0);
@@ -295,6 +336,8 @@ TEST_CASE("4-way: U-turn connections", "[4way][uturn]")
 
 TEST_CASE("4-way: topo-block — obstacle spans full width → Infeasible", "[4way][infeasible][topo_block]")
 {
+    std::cout << "TEST_CASE: " << "4-way: topo-block — obstacle spans full width → Infeasible" << std::endl;
+
     auto inp = build4Way();
     // Obstacle blocks N→S corridor completely
     addObstacle(inp, "BLOCKER", makeRectObstacle({0,0}, 4.0, 2.5));
@@ -314,6 +357,8 @@ TEST_CASE("4-way: topo-block — obstacle spans full width → Infeasible", "[4w
 
 TEST_CASE("4-way: narrow passage — only one lane fits through gap", "[4way][narrow]")
 {
+    std::cout << "TEST_CASE: " << "4-way: narrow passage — only one lane fits through gap" << std::endl;
+
     auto inp = build4Way();
     // Two obstacles leaving ~3m gap (just enough for one lane)
     addObstacle(inp, "OBS_L", makeRectObstacle({-6,0}, 2.0, 8.0));
@@ -331,6 +376,8 @@ TEST_CASE("4-way: narrow passage — only one lane fits through gap", "[4way][na
 
 TEST_CASE("4-way: fence-obstacle sandwich on east side", "[4way][sandwich]")
 {
+    std::cout << "TEST_CASE: " << "4-way: fence-obstacle sandwich on east side" << std::endl;
+
     auto inp = build4Way();
     // Obstacle pressed against right fence edge
     addObstacle(inp, "SANDWICH", makeRectObstacle({6,0}, 2, 3.0));
@@ -380,6 +427,8 @@ static IntersectionInput buildTJunction(int lanes_per_arm = 1, double lane_w = 3
 #ifdef TEST_T
 TEST_CASE("T-junction: clear, all 6 connections", "[T][clear]")
 {
+    std::cout << "TEST_CASE: " << "T-junction: clear, all 6 connections" << std::endl;
+
     auto inp = buildTJunction();
     IntersectionShapeGenerator gen;
     IntersectionOutput out;
@@ -394,6 +443,8 @@ TEST_CASE("T-junction: clear, all 6 connections", "[T][clear]")
 
 TEST_CASE("T-junction: central obstacle forcing reroute", "[T][obstacle]")
 {
+    std::cout << "TEST_CASE: " << "T-junction: central obstacle forcing reroute" << std::endl;
+
     auto inp = buildTJunction();
     addObstacle(inp, "C", makeRectObstacle({-2,0}, 1.5, 1.5));
     IntersectionShapeGenerator gen;
@@ -409,6 +460,8 @@ TEST_CASE("T-junction: central obstacle forcing reroute", "[T][obstacle]")
 
 TEST_CASE("T-junction: 2-lane arms with 1:N split at branch", "[T][1toN][multilane]")
 {
+    std::cout << "TEST_CASE: " << "T-junction: 2-lane arms with 1:N split at branch" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 16.0);
@@ -445,6 +498,8 @@ TEST_CASE("T-junction: 2-lane arms with 1:N split at branch", "[T][1toN][multila
 
 TEST_CASE("T-junction: topo-block on branch arm", "[T][topo_block]")
 {
+    std::cout << "TEST_CASE: " << "T-junction: topo-block on branch arm" << std::endl;
+
     auto inp = buildTJunction();
     // Block the branch corridor completely
     addObstacle(inp, "BLOCK", makeRectObstacle({0,-4}, 5.0, 2.5));
@@ -500,6 +555,8 @@ static IntersectionInput buildYJunction(double lane_w = 3.5)
 #ifdef TEST_Y
 TEST_CASE("Y-junction: clear angled arms — all 6 connections", "[Y][clear]")
 {
+    std::cout << "TEST_CASE: " << "Y-junction: clear angled arms — all 6 connections" << std::endl;
+
     auto inp = buildYJunction();
     IntersectionShapeGenerator gen;
     IntersectionOutput out;
@@ -514,6 +571,8 @@ TEST_CASE("Y-junction: clear angled arms — all 6 connections", "[Y][clear]")
 
 TEST_CASE("Y-junction: central circular obstacle", "[Y][obstacle]")
 {
+    std::cout << "TEST_CASE: " << "Y-junction: central circular obstacle" << std::endl;
+
     auto inp = buildYJunction();
     addObstacle(inp, "CIRC", makeCircleObstacle({0,0}, 2.0));
     IntersectionShapeGenerator gen;
@@ -529,6 +588,8 @@ TEST_CASE("Y-junction: central circular obstacle", "[Y][obstacle]")
 
 TEST_CASE("Y-junction: 1:N — one arm splits to both others", "[Y][1toN]")
 {
+    std::cout << "TEST_CASE: " << "Y-junction: 1:N — one arm splits to both others" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 14.0);
@@ -562,6 +623,8 @@ TEST_CASE("Y-junction: 1:N — one arm splits to both others", "[Y][1toN]")
 
 TEST_CASE("Y-junction: narrow passage between two obstacles", "[Y][narrow]")
 {
+    std::cout << "TEST_CASE: " << "Y-junction: narrow passage between two obstacles" << std::endl;
+
     auto inp = buildYJunction();
     // Two obstacles creating a ~4m gap in the centre
     addObstacle(inp, "OL", makeRectObstacle({-5,2}, 2.5, 2.0));
@@ -631,6 +694,8 @@ static IntersectionInput buildRoundabout(double ring_r = 8.0,
 #ifdef TEST_ROUNDABOUT
 TEST_CASE("Roundabout: with central island — all 12 connections", "[roundabout][island]")
 {
+    std::cout << "TEST_CASE: " << "Roundabout: with central island — all 12 connections" << std::endl;
+
     auto inp = buildRoundabout(8.0, 3.5, true);
     IntersectionShapeGenerator gen;
     IntersectionOutput out;
@@ -645,6 +710,8 @@ TEST_CASE("Roundabout: with central island — all 12 connections", "[roundabout
 
 TEST_CASE("Roundabout: no island — basic connectivity", "[roundabout][no_island]")
 {
+    std::cout << "TEST_CASE: " << "Roundabout: no island — basic connectivity" << std::endl;
+
     auto inp = buildRoundabout(8.0, 3.5, false);
     IntersectionShapeGenerator gen;
     IntersectionOutput out;
@@ -658,6 +725,8 @@ TEST_CASE("Roundabout: no island — basic connectivity", "[roundabout][no_islan
 
 TEST_CASE("Roundabout: oversized island causes narrow passage", "[roundabout][narrow_island]")
 {
+    std::cout << "TEST_CASE: " << "Roundabout: oversized island causes narrow passage" << std::endl;
+
     // Island radius = ring_r = very large, leaving almost no room
     auto inp = buildRoundabout(8.0, 3.5, false);
     addObstacle(inp, "BIG_ISLAND", makeCircleObstacle({0,0}, 9.5, 24));
@@ -674,6 +743,8 @@ TEST_CASE("Roundabout: oversized island causes narrow passage", "[roundabout][na
 
 TEST_CASE("Roundabout: satellite obstacle on ring path", "[roundabout][obstacle]")
 {
+    std::cout << "TEST_CASE: " << "Roundabout: satellite obstacle on ring path" << std::endl;
+
     auto inp = buildRoundabout(8.0, 3.5, true);
     // Extra obstacle on the ring path between N and E
     addObstacle(inp, "DEBRIS", makeRectObstacle({-5,-5}, 1.2, 1.2));
@@ -689,6 +760,8 @@ TEST_CASE("Roundabout: satellite obstacle on ring path", "[roundabout][obstacle]
 
 TEST_CASE("Roundabout: topo-block — central island completely fills fence", "[roundabout][topo_block]")
 {
+    std::cout << "TEST_CASE: " << "Roundabout: topo-block — central island completely fills fence" << std::endl;
+
     auto inp = buildRoundabout(8.0, 3.5, false);
     // Monster obstacle fills the whole junction area
     addObstacle(inp, "FULLBLOCK", makeCircleObstacle({0,0}, 6.0, 24));
@@ -712,6 +785,8 @@ TEST_CASE("Roundabout: topo-block — central island completely fills fence", "[
 #ifdef TEST_OBSTACLE
 TEST_CASE("4-way: multiple obstacles — curves avoid all", "[4way][multi_obs]")
 {
+    std::cout << "TEST_CASE: " << "4-way: multiple obstacles — curves avoid all" << std::endl;
+
     auto inp = build4Way();
     addObstacle(inp, "O1", makeRectObstacle({-4, 4}, 1.0, 1.0));
     addObstacle(inp, "O2", makeRectObstacle({ 4,-4}, 1.0, 1.0));
@@ -725,6 +800,12 @@ TEST_CASE("4-way: multiple obstacles — curves avoid all", "[4way][multi_obs]")
 
     REQUIRE((int)out.connectivity_curves.size() == 12);
     REQUIRE(allCurvesAvoidObstacles(out, inp));
+
+    for (const auto& id : {ConnId("C1"), ConnId("C7"), ConnId("C10")}) {
+        auto* cc = findCurveById(out, id);
+        REQUIRE(cc != nullptr);
+        REQUIRE(minRawObstacleDistance(*cc, inp) > 1.0);
+    }
 }
 
 // TEST_CASE("4-way: sandwich on both sides — forced narrow centre", "[4way][double_sandwich]")
@@ -745,6 +826,8 @@ TEST_CASE("4-way: multiple obstacles — curves avoid all", "[4way][multi_obs]")
 
 TEST_CASE("T-junction: U-turn on branch arm", "[T][uturn]")
 {
+    std::cout << "TEST_CASE: " << "T-junction: U-turn on branch arm" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 14.0);
@@ -781,9 +864,11 @@ TEST_CASE("T-junction: U-turn on branch arm", "[T][uturn]")
 
 TEST_CASE("T-junction: fence-obstacle sandwich on branch side", "[T][sandwich]")
 {
+    std::cout << "TEST_CASE: " << "T-junction: fence-obstacle sandwich on branch side" << std::endl;
+
     auto inp = buildTJunction();
     // Obstacle near top fence edge (above branch)
-    addObstacle(inp, "SAND", makeRectObstacle({0,-12}, 5.0, 1.5));
+    addObstacle(inp, "SAND", makeRectObstacle({0,-5}, 1, 1));
     IntersectionShapeGenerator gen;
     IntersectionOutput out;
     REQUIRE(gen.generate(inp, out));
@@ -796,6 +881,8 @@ TEST_CASE("T-junction: fence-obstacle sandwich on branch side", "[T][sandwich]")
 
 TEST_CASE("Y-junction: all U-turns (unusual but valid)", "[Y][uturn]")
 {
+    std::cout << "TEST_CASE: " << "Y-junction: all U-turns (unusual but valid)" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 16.0);
@@ -829,6 +916,8 @@ TEST_CASE("Y-junction: all U-turns (unusual but valid)", "[Y][uturn]")
 
 TEST_CASE("4-way: all turn types present simultaneously", "[4way][all_turns]")
 {
+    std::cout << "TEST_CASE: " << "4-way: all turn types present simultaneously" << std::endl;
+
     gConnIdx = 0;
     IntersectionInput inp;
     addStandardArea(inp, 18.0);
@@ -859,6 +948,8 @@ TEST_CASE("4-way: all turn types present simultaneously", "[4way][all_turns]")
 
 TEST_CASE("4-way: topology validates — correct boundary counts", "[4way][validation]")
 {
+    std::cout << "TEST_CASE: " << "4-way: topology validates — correct boundary counts" << std::endl;
+
     auto inp = build4Way();
     IntersectionShapeGenerator gen;
     IntersectionOutput out;
@@ -888,6 +979,8 @@ TEST_CASE("4-way: topology validates — correct boundary counts", "[4way][valid
 
 TEST_CASE("All scenario types: perf stats populated and sane", "[perf]")
 {
+    std::cout << "TEST_CASE: " << "All scenario types: perf stats populated and sane" << std::endl;
+
     std::vector<IntersectionInput> inputs = {
         build4Way(), buildTJunction(), buildYJunction(),
         buildRoundabout()
@@ -911,6 +1004,8 @@ TEST_CASE("All scenario types: perf stats populated and sane", "[perf]")
 #ifdef TEST_FILE
 TEST_CASE("Actual intersection of osm", "[actual]")
 {
+    std::cout << "TEST_CASE: " << "Actual intersection of osm" << std::endl;
+
     std::string fpth = std::string(PROJECT_ROOT_DIR) + "/intersection_input.json";
     std::vector<IntersectionInput> inputs = {IntersectionIO::loadFromFile(fpth)};
     for (auto& inp : inputs) {

@@ -35,11 +35,13 @@ private:
 private:
     ConnectivityCurve generateOne(
         const Connectivity& conn, const IntersectionInput& input,
-        const SDFField& sdf, const SDFField& sdf_coarse, const std::vector<SiblingCurve>& siblings);
+        const SDFField& sdf, const SDFField& sdf_coarse, const std::vector<SiblingCurve>& siblings,
+        bool allow_uturn_search = false, bool* out_physical_risk = nullptr);
 
     std::vector<SiblingCurve> buildSiblings(
         const ConnId& id, const std::unordered_map<ConnId, BezierCurve>& done,
-        const ClusterOrderSolver& cs, const std::vector<Connectivity>& conns) const;
+        const ClusterOrderSolver& cs, const std::vector<Connectivity>& conns,
+        bool constrained_only = false) const;
 
     BezierCurve postProcess(
         const BezierCurve& c, const SDFField& sdf, const Polygon2d& fence, double kmax,

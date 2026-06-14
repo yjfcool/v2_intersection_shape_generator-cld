@@ -249,10 +249,39 @@ std::vector<Vec2d> curveCrossings(const BezierCurve& a, const BezierCurve& b, do
 }
 
 bool curvesIntersectBusiness(const BezierCurve& a, const BezierCurve& b, double ep) {
-    auto cr = curveCrossings(a, b);
-    for (auto& pt : cr)
-        if (distToAllEndpoints(pt, a, b) > ep)
+    if (!bboxOverlap(a, b))
+        return false;
+    auto pa = a.sample(40);
+    auto pb = b.sample(40);
+    for (int i = 0; i + 1 < (int)pa.size(); ++i) {
+        for (int j = 0; j + 1 < (int)pb.size(); ++j) {
+            Vec2d isect;
+            if (!segmentsIntersect(pa[i], pa[i + 1], pb[j], pb[j + 1], &isect))
+                continue;
+            if (distToAllEndpoints(isect, a, b) > ep)
+                return true;
+        }
+    }
+    return false;
+}
+
+bool curveSelfIntersectsBusiness(const BezierCurve& c, double ep) {
+    auto pts = c.sample(80);
+    if (pts.size() < 4)
+        return false;
+    for (int i = 0; i + 1 < (int)pts.size(); ++i) {
+        for (int j = i + 2; j + 1 < (int)pts.size(); ++j) {
+            if (i == 0 && j + 1 == (int)pts.size() - 1)
+                continue;
+            Vec2d isect;
+            if (!segmentsIntersect(pts[i], pts[i + 1], pts[j], pts[j + 1], &isect))
+                continue;
+            double d0 = std::min((isect - pts.front()).norm(), (isect - pts.back()).norm());
+            if (d0 <= ep)
+                continue;
             return true;
+        }
+    }
     return false;
 }
 

@@ -1,5 +1,6 @@
 /.idea/
 node_modules
+.DS_Store
 *.bak
 *.gpt
 *.cld
@@ -10,6 +11,8 @@ node_modules
 .claude/
 build/
 cmake-build-debug/
+cmake-build-release/
+cmake-build-tests/
 depends/
 depends.bak/
 src/others/

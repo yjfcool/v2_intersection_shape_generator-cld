@@ -545,13 +545,18 @@ BezierCurve buildInitialCurve(
     // an obstacle.
     constexpr double INIT_CLEARANCE = 0.0; // only bypass on actual penetration
 
-    // ── Fast path: check if a direct Bezier arc is clear ────────────────────
-    // Check straight line first (cheap), then verify the actual Bezier arc.
-    if (straightLineClear(sdf, p0, p1, INIT_CLEARANCE, 40)) {
+    // ── Fast path: keep the natural single-arc turn when it is already clear.
+    //
+    // The old gate checked the endpoint chord before checking the actual Bezier.
+    // For left/right turns the chord can pass through an obstacle even though the
+    // natural turning arc is clear, which incorrectly triggered bypass shaping.
+    {
         BezierSegment trial = makeCubicG1(p0, t0.normalized(), p1, t1.normalized(), 0.4);
         bool bezier_clear = true;
-        for (int i = 1; i < 20; ++i) {
-            std::pair<double, Vec2d> _qt = sdf.queryWithGrad(trial.evaluate((double)i / 20));
+        int samples = std::max(40, (int)std::ceil(trial.arcLength(24) / 0.15));
+        samples = std::min(samples, 320);
+        for (int i = 1; i < samples; ++i) {
+            std::pair<double, Vec2d> _qt = sdf.queryWithGrad(trial.evaluate((double)i / samples));
             if (_qt.first < INIT_CLEARANCE) {
                 bezier_clear = false;
                 break;
@@ -562,7 +567,6 @@ BezierCurve buildInitialCurve(
             c.segs.push_back(trial);
             return c;
         }
-        // Bezier arc penetrates obstacle — fall through to bypass generation
     }
 
     // ── Level-1: geometric direct construction ───────────────────────────────
@@ -576,137 +580,21 @@ BezierCurve buildInitialCurve(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  U-turn: smooth semicircular arc with guaranteed G1 continuity at endpoints
+//  U-turn: single cubic built from aligned endpoint rays.
 //
-//  Strategy: construct a 3-knot curve {p0, apex, p1} where:
-//    - apex is placed far enough forward (along entry tangent direction) to
-//      form a smooth semicircular path
-//    - apex tangent direction is lateral (perpendicular to entry direction),
-//      pointing from p0-side towards p1-side, which is the correct tangent
-//      at the top of a semicircular U-turn
-//    - alpha (handle length ratio) tuned for smooth circular-like curvature
-//
-//  The resulting curve satisfies:
-//    - G1 at p0: curve starts in direction t0
-//    - G1 at p1: curve ends in direction t1
-//    - Smooth semicircular shape without kinks or bends
+//  The old implementation inserted an apex knot between p0 and p1. For nearly
+//  anti-parallel lanes this can invert the control polygon and create a visible
+//  kink/S bend. The cubic below keeps only endpoint controls: first align the
+//  longitudinal offset along the entry/reverse-exit rays, then use 2/3 of the
+//  aligned lateral gap as the circular-arc handle length.
 // ─────────────────────────────────────────────────────────────────────────────
 BezierCurve buildTwoSegmentUTurn(
     const Vec2d& p0, const Vec2d& t0,
     const Vec2d& p1, const Vec2d& t1, const SDFField& sdf, const Polygon2d&) {
-    // Normalise endpoint tangents
-    Vec2d T0 = t0.normalized();
-    Vec2d T1 = t1.normalized();
-
-    // Lateral distance between p0 and p1 (perpendicular to entry direction)
-    Vec2d perp_left{-T0[1], T0[0]}; // left perpendicular of entry direction
-
-    // Determine which side p1 is on relative to p0's entry direction.
-    // For a standard left U-turn, p1 is to the LEFT of t0.
-    double lateral_offset = (p1 - p0).dot(perp_left);
-
-    // U-turn radius: should be large enough for a smooth semicircle.
-    // The radius is at least half the lateral distance, but also at least
-    // a comfortable minimum (related to typical lane width and turning radius).
-    double lat_dist = std::abs(lateral_offset);
-    double forward_dist = (p1 - p0).dot(T0); // how far apart along entry direction
-
-    // Compute a suitable apex forward extension distance.
-    // For a semicircular U-turn the apex should be at distance R from both
-    // endpoints where R = max(lat_dist, comfortable_min_radius).
-    // The forward extension is: sqrt(R² - (lat_dist/2)²) for a circle,
-    // but we use a simpler heuristic: go forward enough for a smooth arc.
-    double min_radius = std::max(4.0, lat_dist * 0.8);
-    double apex_forward = std::max(
-        min_radius, std::max(lat_dist * 1.2, std::abs(forward_dist) + min_radius * 0.6));
-
-    // Apex position: midpoint of p0–p1, extended along the natural arc direction.
-    // ── forward_dir: restored to (T0–T1).normalized() ≈ T0 for anti-parallel ──
-    // Correct approach: keep forward_dir = T0, then LIFT the apex laterally to
-    // guarantee sufficient clearance from both endpoints, which both prevents
-    // control-polygon inversion AND produces a natural eastward arc.
-    Vec2d base_mid = 0.5 * (p0 + p1);
-    Vec2d forward_dir = (T0 - T1);
-    if (forward_dir.norm() < 1e-8) forward_dir = T0;
-    forward_dir.normalize();
-
-    Vec2d apex = base_mid + forward_dir * apex_forward;
-
-    // ── Lateral lift: ensure apex clears both endpoints by ≥4 m ─────────────
-    // Even with forward_dir≈T0 the apex can be too close to p0/p1 in the
-    // lateral (perp_left) direction when lat_dist is small or p1 is far ahead.
-    // A low apex causes a right-turn kink in the control polygon → self-
-    // intersection or distorted shape.  Lift along perp_left until clear.
-    {
-        double p0_lat = p0.dot(perp_left);
-        double p1_lat = p1.dot(perp_left);
-        double apex_lat = apex.dot(perp_left);
-        if (lateral_offset >= 0) {
-            // left U-turn: apex must be above both endpoints
-            double required = std::max(p0_lat, p1_lat) + 4.0;
-            if (apex_lat < required)
-                apex += (required - apex_lat) * perp_left;
-        } else {
-            // right U-turn: apex must be below both endpoints
-            double required = std::min(p0_lat, p1_lat) - 4.0;
-            if (apex_lat > required)
-                apex += (required - apex_lat) * perp_left;
-        }
-    }
-
-    // Try the preferred side; if SDF shows obstacle, try opposite
-    if (sdf.valid()) {
-        std::pair<double, Vec2d> _qa2 = sdf.queryWithGrad(apex);
-        if (_qa2.first < 0.3) {
-            // Try mirrored apex (opposite forward direction)
-            Vec2d apex_alt = base_mid - forward_dir * apex_forward;
-            std::pair<double, Vec2d> _qalt = sdf.queryWithGrad(apex_alt);
-            if (_qalt.first > _qa2.first) {
-                apex = apex_alt;
-                forward_dir = -forward_dir;
-            }
-        }
-    }
-
-    // Apex tangent: perpendicular to the forward direction, pointing laterally.
-    // For forward_dir ≈ T0 (east), apex_perp = left of T0 ≈ northward.
-    // This is the correct "top of arc" tangent for a left U-turn going east:
-    // the curve is momentarily going northward at the easternmost apex point.
-    Vec2d apex_perp{-forward_dir[1], forward_dir[0]}; // left of forward_dir
-    double sign = (p1 - p0).dot(apex_perp);
-    Vec2d T_apex = (sign >= 0) ? apex_perp : -apex_perp;
-
-    // ── Alpha-max clamp: prevent control-polygon inversion in seg0 ───────────
-    // The convexity constraint for seg0 gives an upper bound on alpha:
-    //   cross2d(T0, D0) − α·d0·cross2d(T0, T_apex) ≥ 0
-    //   → α ≤ cross2d(T0, D0) / (d0·cross2d(T0, T_apex))
-    // Without this clamp a large alpha makes ctrl[2] dip below p0 (or p1),
-    // causing a right-turn kink in the control polygon and self-intersection.
-    double alpha = 0.39;
-    {
-        Vec2d D0 = apex - p0;
-        double d0 = D0.norm();
-        double cross_uD0 = cross2d(T0, D0);
-        double cross_uv  = cross2d(T0, T_apex);
-        if (cross_uv > 1e-9 && d0 > 1e-9) {
-            double alpha_max0 = cross_uD0 / (d0 * cross_uv);
-            if (alpha_max0 > 0.0) alpha = std::min(alpha, alpha_max0 * 0.92);
-        }
-        // Also clamp for seg1: T_apex → T1 over chord apex→p1
-        Vec2d D1 = p1 - apex;
-        double d1 = D1.norm();
-        double cross_vD1 = cross2d(T_apex, D1);
-        double cross_vw  = cross2d(T_apex, T1);
-        if (cross_vw > 1e-9 && d1 > 1e-9) {
-            double alpha_max1 = cross_vD1 / (d1 * cross_vw);
-            if (alpha_max1 > 0.0) alpha = std::min(alpha, alpha_max1 * 0.92);
-        }
-        // Enforce minimum handle length
-        alpha = std::max(alpha, 0.05);
-    }
-
-    // Build the 2-segment G1 curve through {p0, apex, p1}
-    return makeCurveFromKnots({p0, apex, p1}, {T0, T_apex, T1}, alpha);
+    (void)sdf;
+    BezierCurve c;
+    c.segs.push_back(makeAlignedUTurnCubic(p0, t0, p1, t1));
+    return c;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

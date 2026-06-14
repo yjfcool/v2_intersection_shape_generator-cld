@@ -80,6 +80,7 @@ buildArm(const ArmDef& arm, IntersectionInput& inp)
         Lane l;
         l.id    = mkLaneId(true, i);
         l.width = arm.lane_w;
+        l.groupId = eg.id;
         l.geometry.points = { centre_out, centre_jct };   // outside → junction
         eg.lanes.push_back(l.id);
         inp.lanes.push_back(l);
@@ -104,6 +105,7 @@ buildArm(const ArmDef& arm, IntersectionInput& inp)
         Lane l;
         l.id    = mkLaneId(false, i);
         l.width = arm.lane_w;
+        l.groupId = xg.id;
         l.geometry.points = { centre_jct, centre_out };   // junction → outside
         xg.lanes.push_back(l.id);
         inp.lanes.push_back(l);
@@ -123,11 +125,23 @@ inline void addConn(IntersectionInput& inp,
                     const LaneId& entry, const LaneId& exit,
                     ConnTurnType tt)
 {
+    auto findGroupForLane = [&](const LaneId& lane_id, GroupRole role) {
+        for (const auto& g : inp.lane_groups) {
+            if (g.role != role) continue;
+            for (const auto& lid : g.lanes)
+                if (lid == lane_id)
+                    return g.id;
+        }
+        return LaneGroupId{};
+    };
+
     Connectivity c;
     c.id            = "C" + std::to_string(gConnIdx++);
     c.entry_lane_id = entry;
     c.exit_lane_id  = exit;
     c.turn_type     = tt;
+    c.enterGroupId  = findGroupForLane(entry, GroupRole::Entry);
+    c.exitGroupId   = findGroupForLane(exit, GroupRole::Exit);
     inp.connectivities.push_back(c);
 }
 

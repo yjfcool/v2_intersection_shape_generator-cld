@@ -25,5 +25,6 @@ double distToAllEndpoints(const Vec2d&, const BezierCurve&, const BezierCurve&);
 std::vector<Vec2d> curveCrossings(const BezierCurve&, const BezierCurve&, double tol = 0.01);
 bool bboxOverlap(const BezierCurve&, const BezierCurve&);
 bool curvesIntersectBusiness(const BezierCurve&, const BezierCurve&, double ep = 0.01);
+bool curveSelfIntersectsBusiness(const BezierCurve&, double ep = 0.01);
 
 }

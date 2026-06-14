@@ -13,13 +13,14 @@ int main(int argc, char* argv[]) {
         files.emplace_back(argv[1]);
     } else {
         files = {
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_input.json",
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_ds.json",
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_jd.json",
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643.json",
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699.json",
+//            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_input.json",
+//            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_ds.json",
+//            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_jd.json",
+//            std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
+//            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
+                std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643-0.json",
+                std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643.json",
+//            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699.json",
         };
     }
 
@@ -33,6 +34,8 @@ int main(int argc, char* argv[]) {
         for (auto& inp : inputs) {
             std::cout << "Processing input with " << inp.connectivities.size() << " connectivities and "
                       << inp.lanes.size() << " lanes" << std::endl;
+
+            save(inp, "./" + fname + "/input/", "");
 
             isg::IntersectionShapeGenerator gen;
             isg::IntersectionOutput out;
@@ -59,7 +62,6 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "Successfully generated " << out.connectivity_curves.size() << " connectivity curves" << std::endl;
 
-            save(inp, "./" + fname + "/input/", "");
             save(out, "./" + fname + "/output/", "");
         }
     }
