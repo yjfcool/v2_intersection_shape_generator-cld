@@ -13,14 +13,9 @@ namespace isg {
 
 /**
  * 精细路口面构建
- * 输入：道路边缘线（独立线段）+ 生成的车道边线端点
- * 输出：封闭多边形（路口面）
- *
- * 流程：
- *  1. 确定路口范围（rough_area 或 由连接点包围盒扩展）
- *  2. 裁剪/截取每条道路边缘线在路口侧的端点
- *  3. 按极角排序端点，连接成封闭多边形
- *  4. 相邻端点间若属同一边缘线则沿线连接，否则直连
+ * 处理：道路边缘线（独立线段）+ 进入组(或退出组)尾端(或首端)边线回缩线(外扩线) / 停止线回缩线;
+ *      如果缩扩延长线与道路边缘相交时需截取有效段作为路口边线;
+ * 输出：封闭可凹陷多边形（路口面）
  */
 struct EdgeEndpoint {
     Vec2d   pt;
@@ -34,10 +29,21 @@ class IntersectionAreaBuilder {
     double snapTolerance = 0.5;
     // 路口面多边形绕向 (逆时针:"counterclockwise" | 顺时针:"clockwise")
     std::string winding = "clockwise";
+    // 进入组端侧边界向路口内回缩、退出组端侧边界向路口外扩的距离(米)
+    double groupCutOffset = 0.05;
+    // 端侧边界折线两端用于对齐道路边缘线的外延长度(米)
+    double cutLineExtension = 0.20;
 
 public:
-    explicit IntersectionAreaBuilder(double _snapTolerance = 0.5, std::string _winding = "clockwise")
-        : snapTolerance(_snapTolerance), winding(_winding) {}
+    explicit IntersectionAreaBuilder(
+        double _snapTolerance = 0.5,
+        std::string _winding = "clockwise",
+        double _groupCutOffset = 0.05,
+        double _cutLineExtension = 0.20)
+        : snapTolerance(_snapTolerance),
+          winding(_winding),
+          groupCutOffset(std::max(0.0, _groupCutOffset)),
+          cutLineExtension(std::max(0.0, _cutLineExtension)) {}
 
     IntersectionArea build(
         const IntersectionInput& inp,
@@ -57,9 +63,6 @@ public:
             junctArea.is_rough = false;
             return junctArea;
         }
-
-        // std::cout<<("Polygon: center=(" + std::to_string(center[0]) + "," +
-        //              std::to_string(center[1]) + ") radius=" + std::to_string(radius))<<std::endl;
 
         // 2. 裁剪道路边缘线，获取路口侧端点集
         std::vector<EdgeEndpoint> endpoints;
@@ -94,21 +97,16 @@ public:
                 // 吸附到最近的车道边线端点
                 Vec2d snapped = snapToEdgePt(candidatePt, edgelines, inp, snapTolerance);
                 endpoints.emplace_back(EdgeEndpoint{snapped, i, isStart});
-                // std::cout<<("Edge endpoint[" + std::to_string(i) + "]: ("
-                //     + std::to_string(snapped[0]) + "," + std::to_string(snapped[1]) + ")")<<std::endl;
             }
         }
 
         // 若道路边缘线端点不足，从连通关系连接点的外侧边线端点补充
         if (endpoints.size() < 3) {
-            // std::cout<<("Road edge endpoints insufficient (" +
-            //              std::to_string(endpoints.size()) + "), supplementing from lane edges.")<<std::endl;
             supplementEndpointsFromLaneEdges(endpoints, inp, edgelines, center, radius);
         }
 
         if (endpoints.size() < 3) {
             // 终极回退：用所有连接点的凸包
-            // std::cout<<("Still insufficient endpoints, using convex hull of connection points.")<<std::endl;
             junctArea.geometry.outer = buildConvexHullFallback(inp, centerlines);
             junctArea.is_rough = false;
             return junctArea;
@@ -153,18 +151,6 @@ public:
 
         // 6. 多边形修复（移除共线点，确保逆/顺时针）
         junctArea.geometry.outer = repairPolygon(rawPoly, center);
-
-        // 7. 确保多边形包含所有中心线采样点（扩展检查）
-        // 精细路口面只由边界形态、曲线端点和停止线约束共同围成；
-        // 不再用中心线采样点扩张，否则会抹掉停止线/边界形成的凹陷。
-
-        double area = polygonArea(junctArea.geometry.outer);
-        // std::cout<<("Polygon built: vertices=" + std::to_string(junctArea.geometry.outer.size())
-        //              + " area=" + std::to_string(area))<<std::endl;
-        //
-        // if(area < 1.0){
-        //     std::cout<<("Polygon area too small: " + std::to_string(area));
-        // }
 
         junctArea.is_rough = false;
         return junctArea;
@@ -271,7 +257,7 @@ private:
             return shifted;
         shifted.reserve(sl.geometry.points.size());
         for (const auto& pt : sl.geometry.points)
-            shifted.push_back(pt + 0.05 * dir.normalized());
+            shifted.push_back(pt + groupCutOffset * dir.normalized());
         return shifted;
     }
 
@@ -738,7 +724,7 @@ private:
             return shifted;
         shifted.reserve(break_line.size());
         for (const auto& pt : break_line)
-            shifted.push_back(pt + 0.05 * dir.normalized());
+            shifted.push_back(pt + groupCutOffset * dir.normalized());
         return shifted;
     }
 
@@ -911,6 +897,7 @@ private:
         return subPolylineByStation(pts, best_s0, best_s1);
     }
 
+    // 当前需求改为按进入/退出组端侧折线生成。旧方案：道路边缘 + 停止线回缩线，注释保留了调用
     std::vector<Vec2d> buildFromBoundaryElements(
         const IntersectionInput& inp,
         const std::vector<ConnectivityCurve>& centerlines,
@@ -971,6 +958,325 @@ private:
         return repairPolygon(raw, center);
     }
 
+    struct GroupCutPoint {
+        Vec2d pt{0, 0};
+        double lateral = 0.0;
+        int order = 0;
+        bool has_order = false;
+    };
+
+    // 统一车道/边线在组端侧的连接方向：进入组指向路口内，退出组指向路口外。
+    // 先取连接端切向，再用路口中心校正方向，避免折线整体平移反向。
+    Vec2d directedConnDir(
+        const std::vector<Vec2d>& pts, GroupRole role, const Vec2d& center) const {
+        bool is_entry = (role == GroupRole::Entry);
+        Vec2d p = getConnPoint(pts, is_entry);
+        Vec2d d = getConnTangent(pts, is_entry);
+        Vec2d wanted = is_entry ? (center - p) : (p - center);
+        if (wanted.norm() > 1e-8 && d.dot(wanted) < 0.0)
+            d = -d;
+        if (d.norm() < 1e-8)
+            return Vec2d(1, 0);
+        return d.normalized();
+    }
+
+    // 收集车道边线 id 时去重，避免 group.boundaries 与车道左右边线重复。
+    void addUniqueLaneEdgeId(std::vector<LaneEdgeId>& ids, const LaneEdgeId& id) const {
+        if (!id.empty() && std::find(ids.begin(), ids.end(), id) == ids.end())
+            ids.push_back(id);
+    }
+
+    // 提取组内参与端侧边界的车道边线：优先组边界，再补充组内车道左右边线。
+    std::vector<LaneEdgeId> laneGroupEdgeIds(
+        const IntersectionInput& inp, const LaneGroup& group) const {
+        std::vector<LaneEdgeId> ids;
+        for (const auto& edge_id : group.boundaries)
+            addUniqueLaneEdgeId(ids, edge_id);
+        for (const auto& lane_id : uniqueGroupLaneIds(group)) {
+            const Lane* lane = inp.findLane(lane_id);
+            if (!lane)
+                continue;
+            addUniqueLaneEdgeId(ids, lane->left_edge_id);
+            addUniqueLaneEdgeId(ids, lane->right_edge_id);
+        }
+        return ids;
+    }
+
+    // 将组端侧形点按容差去重后加入候选集，保留排序所需的 line/lane order 信息。
+    void addGroupCutPoint(std::vector<GroupCutPoint>& pts, GroupCutPoint p, double tol = 0.03) const {
+        for (const auto& existing : pts) {
+            if (dist(existing.pt, p.pt) <= tol)
+                return;
+        }
+        pts.push_back(p);
+    }
+
+    // 计算组端侧折线的平移方向：汇总边线和中心线端侧切向，失败时用组端点到中心兜底。
+    // 返回方向已区分进入组回缩到路口内、退出组外扩到路口外。
+    Vec2d laneGroupShiftDir(
+        const IntersectionInput& inp, const LaneGroup& group, const Vec2d& center) const {
+        Vec2d dir(0, 0);
+        int count = 0;
+        for (const auto& edge_id : laneGroupEdgeIds(inp, group)) {
+            const LaneEdge* edge = inp.findEdge(edge_id);
+            if (!edge || edge->geometry.points.size() < 2)
+                continue;
+            dir += directedConnDir(edge->geometry.points, group.role, center);
+            ++count;
+        }
+        for (const auto& lane_id : uniqueGroupLaneIds(group)) {
+            const Lane* lane = inp.findLane(lane_id);
+            if (!lane || lane->geometry.points.size() < 2)
+                continue;
+            dir += directedConnDir(lane->geometry.points, group.role, center);
+            ++count;
+        }
+        if (count > 0 && dir.norm() > 1e-8)
+            return dir.normalized();
+
+        Vec2d mid(0, 0);
+        count = 0;
+        for (const auto& lane_id : uniqueGroupLaneIds(group)) {
+            const Lane* lane = inp.findLane(lane_id);
+            if (!lane || lane->geometry.points.empty())
+                continue;
+            mid += getConnPoint(lane->geometry.points, group.role == GroupRole::Entry);
+            ++count;
+        }
+        if (count > 0) {
+            mid /= (double)count;
+            dir = (group.role == GroupRole::Entry) ? (center - mid) : (mid - center);
+            if (dir.norm() > 1e-8)
+                return dir.normalized();
+        }
+        return Vec2d(1, 0);
+    }
+
+    // 构建进入/退出组的端侧边界折线：收集车道边线端点和中心线端点，按线序/车道序连接。
+    // 最终整条折线按接口传入的 groupCutOffset 做进入组回缩或退出组外扩。
+    std::vector<Vec2d> buildLaneGroupCutLine(
+        const IntersectionInput& inp, const LaneGroup& group, const Vec2d& center) const {
+        std::vector<GroupCutPoint> cut_pts;
+        Vec2d shift_dir = laneGroupShiftDir(inp, group, center);
+
+        for (const auto& edge_id : laneGroupEdgeIds(inp, group)) {
+            const LaneEdge* edge = inp.findEdge(edge_id);
+            if (!edge || edge->geometry.points.size() < 2)
+                continue;
+            GroupCutPoint cp;
+            cp.pt = getConnPoint(edge->geometry.points, group.role == GroupRole::Entry);
+            cp.order = edge->lineOrder;
+            cp.has_order = true;
+            addGroupCutPoint(cut_pts, cp);
+        }
+
+        for (const auto& lane_id : uniqueGroupLaneIds(group)) {
+            const Lane* lane = inp.findLane(lane_id);
+            if (!lane || lane->geometry.points.size() < 2)
+                continue;
+            GroupCutPoint cp;
+            cp.pt = getConnPoint(lane->geometry.points, group.role == GroupRole::Entry);
+            cp.order = lane->laneOrder * 2 + 1;
+            cp.has_order = true;
+            addGroupCutPoint(cut_pts, cp);
+        }
+
+        if (cut_pts.size() < 2)
+            return {};
+        Vec2d lateral_dir = rotLeft(shift_dir);
+        for (auto& p : cut_pts)
+            p.lateral = p.pt.dot(lateral_dir);
+
+        std::sort(cut_pts.begin(), cut_pts.end(), [](const GroupCutPoint& a, const GroupCutPoint& b) {
+            if (a.has_order != b.has_order)
+                return a.has_order > b.has_order;
+            if (a.has_order && a.order != b.order)
+                return a.order < b.order;
+            return a.lateral < b.lateral;
+        });
+
+        std::vector<Vec2d> out;
+        for (const auto& p : cut_pts)
+            pushUnique(out, p.pt + groupCutOffset * shift_dir, 0.03);
+        return out;
+    }
+
+    // 将端侧边界折线两端按接口参数外延，用外延段与道路边缘求交来消除未对齐尖角。
+    // 仅延长首尾端点，中间形点保持原折线形态。
+    std::vector<Vec2d> extendCutLineEnds(const std::vector<Vec2d>& line) const {
+        std::vector<Vec2d> out = line;
+        if (out.size() < 2)
+            return out;
+        double len = cutLineExtension;
+        Vec2d first_dir = out.front() - out[1];
+        if (first_dir.norm() > 1e-8)
+            out.front() += len * first_dir.normalized();
+        Vec2d last_dir = out.back() - out[out.size() - 2];
+        if (last_dir.norm() > 1e-8)
+            out.back() += len * last_dir.normalized();
+        return out;
+    }
+
+    struct BoundaryHit {
+        bool found = false;
+        int boundary_index = -1;
+        Vec2d pt{0, 0};
+        double station = 0.0;
+        double distance = 1e18;
+    };
+
+    // 查找外延探测线与所有道路边缘线的最近交点，优先选择离原端点最近的交点。
+    BoundaryHit nearestBoundaryHit(
+        const std::vector<Vec2d>& probe,
+        const std::vector<std::vector<Vec2d>>& boundaries,
+        const Vec2d& prefer) const {
+        BoundaryHit best;
+        for (int i = 0; i < (int)boundaries.size(); ++i) {
+            for (const auto& hit : polylineIntersections(probe, boundaries[i])) {
+                double d = dist(hit.pt, prefer);
+                if (d < best.distance) {
+                    best.found = true;
+                    best.boundary_index = i;
+                    best.pt = hit.pt;
+                    best.station = hit.station_b;
+                    best.distance = d;
+                }
+            }
+        }
+        return best;
+    }
+
+    // 记录道路边缘被端侧边界折线命中的里程位置，后续据此截取有效道路边缘段。
+    void addBoundaryHitStation(
+        std::vector<std::vector<double>>& hit_stations,
+        const BoundaryHit& hit) const {
+        if (!hit.found || hit.boundary_index < 0 ||
+            hit.boundary_index >= (int)hit_stations.size())
+            return;
+        for (double s : hit_stations[hit.boundary_index])
+            if (std::abs(s - hit.station) < 0.03)
+                return;
+        hit_stations[hit.boundary_index].push_back(hit.station);
+    }
+
+    // 对齐端侧边界折线与道路边缘：端侧折线两端外延求交，并同步截取对应道路边缘。
+    // 若某端没有交点，则保留原端点和原道路边缘，避免过度裁剪。
+    std::vector<std::vector<Vec2d>> alignCutLinesAndBoundaries(
+        std::vector<std::vector<Vec2d>>& boundary_lines,
+        std::vector<std::vector<Vec2d>> cut_lines,
+        const Vec2d& center) const {
+        std::vector<std::vector<double>> hit_stations(boundary_lines.size());
+
+        std::vector<std::vector<Vec2d>> adjusted_cuts;
+        adjusted_cuts.reserve(cut_lines.size() * 2);
+        for (auto& cut : cut_lines) {
+            if (cut.size() < 2)
+                continue;
+            std::vector<Vec2d> extended = extendCutLineEnds(cut);
+            std::vector<Vec2d> first_probe = {extended.front(), cut.front()};
+            std::vector<Vec2d> last_probe = {cut.back(), extended.back()};
+            BoundaryHit first_hit = nearestBoundaryHit(first_probe, boundary_lines, cut.front());
+            BoundaryHit last_hit = nearestBoundaryHit(last_probe, boundary_lines, cut.back());
+            if (first_hit.found)
+                cut.front() = first_hit.pt;
+            if (last_hit.found)
+                cut.back() = last_hit.pt;
+            addBoundaryHitStation(hit_stations, first_hit);
+            addBoundaryHitStation(hit_stations, last_hit);
+            adjusted_cuts.push_back(cut);
+        }
+
+        for (int i = 0; i < (int)boundary_lines.size(); ++i) {
+            if (boundary_lines[i].size() < 2)
+                continue;
+            if (hit_stations[i].empty())
+                continue;
+            double total = polylineLength(boundary_lines[i]);
+            std::sort(hit_stations[i].begin(), hit_stations[i].end());
+            double s0 = 0.0;
+            double s1 = total;
+            if (hit_stations[i].size() >= 2) {
+                s0 = hit_stations[i].front();
+                s1 = hit_stations[i].back();
+            } else {
+                double s = hit_stations[i].front();
+                Vec2d mid0 = pointAtStation(boundary_lines[i], 0.5 * s);
+                Vec2d mid1 = pointAtStation(boundary_lines[i], 0.5 * (s + total));
+                if (dist(mid0, center) < dist(mid1, center)) {
+                    s0 = 0.0;
+                    s1 = s;
+                } else {
+                    s0 = s;
+                    s1 = total;
+                }
+            }
+            s0 = std::max(0.0, std::min(total, s0));
+            s1 = std::max(0.0, std::min(total, s1));
+            if (s1 - s0 > 0.05)
+                boundary_lines[i] = subPolylineByStation(boundary_lines[i], s0, s1);
+        }
+        return adjusted_cuts;
+    }
+
+    // 组装精细路口面：道路边缘线与所有进入/退出组端侧边界折线共同排序成可凹多边形。
+    // 端侧边界先按组回缩/外扩，再与道路边缘对齐，最后统一修复多边形绕向与闭合。
+    std::vector<Vec2d> buildFromLaneGroupCuts(
+        const IntersectionInput& inp, const Vec2d& center) const {
+        std::vector<AreaChain> chains;
+        std::vector<std::vector<Vec2d>> boundary_lines;
+        std::vector<std::vector<Vec2d>> cut_lines;
+
+        for (const auto& bnd : inp.boundaries) {
+            if (bnd.geometry.points.size() < 2)
+                continue;
+            boundary_lines.push_back(bnd.geometry.points);
+        }
+
+        for (const auto& group : inp.lane_groups) {
+            std::vector<Vec2d> cut = buildLaneGroupCutLine(inp, group, center);
+            if (cut.size() >= 2)
+                cut_lines.push_back(cut);
+        }
+
+        std::vector<std::vector<Vec2d>> aligned_cuts =
+            alignCutLinesAndBoundaries(boundary_lines, cut_lines, center);
+
+        for (const auto& line : boundary_lines) {
+            if (line.size() < 2)
+                continue;
+            AreaChain chain;
+            chain.pts = line;
+            chains.push_back(orientChain(chain, center));
+        }
+        for (const auto& line : aligned_cuts) {
+            if (line.size() < 2)
+                continue;
+            AreaChain chain;
+            chain.pts = line;
+            chains.push_back(orientChain(chain, center));
+        }
+
+        if (chains.size() < 3)
+            return {};
+
+        std::sort(chains.begin(), chains.end(), [&](const AreaChain& a, const AreaChain& b) {
+            double angA = angleOf(chainMidpoint(a), center);
+            double angB = angleOf(chainMidpoint(b), center);
+            return winding == "clockwise" ? angA > angB : angA < angB;
+        });
+
+        std::vector<Vec2d> raw;
+        for (const auto& chain : chains) {
+            for (const auto& pt : chain.pts)
+                pushUnique(raw, pt);
+        }
+        if (raw.size() < 3)
+            return {};
+        return repairPolygon(raw, center);
+    }
+
+    // 旧方案：无道路边缘时在 rough_area 上插入停止线 break-line。
+    // 当前精细面生成暂不使用该路径，入口调用已注释保留，函数体留作后续回退参考。
     std::vector<Vec2d> buildFromRoughBase(
         const IntersectionInput& inp, const Vec2d& center) const {
         std::vector<Vec2d> skeleton = openRing(inp.area.geometry.outer);
@@ -1014,15 +1320,28 @@ private:
         return repairPolygon(raw, center);
     }
 
+    // 精细路口面入口：优先使用进入/退出组端侧边界折线围成可凹多边形。
+    // 道路边缘存在时参与端侧线对齐和边缘截断；不存在时仍保留组端侧线的回缩/外扩结果。
+    // 暂未启用的停止线/rough_area 旧路径只保留注释调用，由 build() 的传统端点法兜底。
     std::vector<Vec2d> buildFinePolygon(
         const IntersectionInput& inp,
         const std::vector<ConnectivityCurve>& centerlines,
         const Vec2d& center,
         double radius) const {
+        (void)centerlines;
         (void)radius;
-        if (!inp.boundaries.empty())
-            return buildFromBoundaryElements(inp, centerlines, center);
-        return buildFromRoughBase(inp, center);
+        std::vector<Vec2d> by_group_cuts = buildFromLaneGroupCuts(inp, center);
+        if (by_group_cuts.size() >= 4)
+            return by_group_cuts;
+
+        if (!inp.boundaries.empty()) {
+            // 当前精细路口面暂不使用停止线 break-line 旧逻辑，保留代码便于后续对比/回退。
+            // return buildFromBoundaryElements(inp, centerlines, center);
+        }
+
+        // 当前精细路口面暂不使用 rough_area + 停止线插入旧逻辑，保留代码便于后续对比/回退。
+        // return buildFromRoughBase(inp, center);
+        return {};
     }
 
     // 计算路口中心点（连接点的质心）

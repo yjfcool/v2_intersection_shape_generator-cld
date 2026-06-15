@@ -14,6 +14,7 @@ public:
     struct Config {
         double sdf_cell_size = 0.2, obstacle_buffer = 0.4, kappa_max = 0.25;
         LBFGSConfig lbfgs;
+        ConnectivityDirectionConfig connectivity_direction;
     };
 
     IntersectionShapeGenerator();

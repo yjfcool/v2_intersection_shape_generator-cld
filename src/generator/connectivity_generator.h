@@ -24,12 +24,15 @@ private:
 
 class ConnectivityGenerator {
 public:
-    explicit ConnectivityGenerator(const LBFGSConfig& cfg = {});
+    explicit ConnectivityGenerator(
+        const LBFGSConfig& cfg = {},
+        const ConnectivityDirectionConfig& direction_cfg = {});
     std::vector<ConnectivityCurve> generate(const IntersectionInput&, SDFField&, double* out_ms = nullptr);
 
 private:
     LBFGSSolver solver_;
     ClusterOrderSolver cluster_solver_;
+    ConnectivityDirectionConfig direction_cfg_;
     std::unique_ptr<QuadTree> quad_tree_; // Persistent spatial index for faster sibling queries across all curves
 
 private:

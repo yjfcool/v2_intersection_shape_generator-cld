@@ -75,6 +75,189 @@ std::pair<Vec2d, Vec2d> IntersectionInput::exitPtDir(const LaneId& lid) const {
     return {exitLinePoint(l->geometry.points), exitLineTangent(l->geometry.points)};
 }
 
+struct LaneDirectionSample {
+    LaneId lane_id;
+    Vec2d direction{1, 0};
+    int lane_order = 0;
+    int group_index = 0;
+};
+
+static double directionAngleDiff(const Vec2d& a, const Vec2d& b) {
+    if (a.norm() < 1e-10 || b.norm() < 1e-10)
+        return M_PI;
+    double c = a.normalized().dot(b.normalized());
+    c = std::max(-1.0, std::min(1.0, c));
+    return std::acos(c);
+}
+
+static const Lane* findLaneById(const std::vector<Lane>& lanes, const LaneId& id) {
+    for (const auto& lane : lanes)
+        if (lane.id == id)
+            return &lane;
+    return nullptr;
+}
+
+static Lane* findLaneById(std::vector<Lane>& lanes, const LaneId& id) {
+    for (auto& lane : lanes)
+        if (lane.id == id)
+            return &lane;
+    return nullptr;
+}
+
+static Vec2d laneDirectionForRole(const Lane& lane, GroupRole role) {
+    Vec2d dir = role == GroupRole::Entry
+        ? entryLineTangent(lane.geometry.points)
+        : exitLineTangent(lane.geometry.points);
+    return dir.norm() > 1e-10 ? dir.normalized() : Vec2d(1, 0);
+}
+
+static std::vector<LaneDirectionSample> collectLaneDirections(
+    const LaneGroup& group, const std::vector<Lane>& lanes) {
+    std::vector<LaneDirectionSample> samples;
+    samples.reserve(group.lanes.size());
+    std::unordered_set<LaneId> seen_lanes;
+    for (int i = 0; i < (int)group.lanes.size(); ++i) {
+        if (!seen_lanes.insert(group.lanes[i]).second)
+            continue;
+        const Lane* lane = findLaneById(lanes, group.lanes[i]);
+        if (!lane || lane->geometry.points.empty())
+            continue;
+        LaneDirectionSample s;
+        s.lane_id = lane->id;
+        s.direction = laneDirectionForRole(*lane, group.role);
+        s.lane_order = lane->laneOrder;
+        s.group_index = i;
+        samples.push_back(s);
+    }
+    return samples;
+}
+
+static const LaneDirectionSample* innermostLaneDirection(
+    const std::vector<LaneDirectionSample>& samples) {
+    if (samples.empty())
+        return nullptr;
+    return &*std::min_element(
+        samples.begin(), samples.end(),
+        [](const LaneDirectionSample& a, const LaneDirectionSample& b) {
+            if (a.lane_order != b.lane_order)
+                return a.lane_order < b.lane_order;
+            return a.group_index < b.group_index;
+        });
+}
+
+static Vec2d meanDirectionFromSupport(
+    const std::vector<LaneDirectionSample>& samples,
+    const std::vector<int>& support,
+    const Vec2d& fallback) {
+    Vec2d sum(0, 0);
+    for (int idx : support) {
+        if (idx < 0 || idx >= (int)samples.size())
+            continue;
+        if (samples[idx].direction.norm() > 1e-10)
+            sum += samples[idx].direction.normalized();
+    }
+    return sum.norm() > 1e-10 ? sum.normalized() : fallback;
+}
+
+static Vec2d groupUnifiedDirection(
+    const LaneGroup& group, const std::vector<Lane>& lanes, double threshold_deg) {
+    auto samples = collectLaneDirections(group, lanes);
+    const auto* inner = innermostLaneDirection(samples);
+    Vec2d fallback = inner ? inner->direction : Vec2d(1, 0);
+
+    if (samples.size() <= 2)
+        return fallback;
+
+    double threshold_rad = std::max(0.0, std::min(180.0, threshold_deg)) * M_PI / 180.0;
+    int best_idx = -1;
+    int best_count = 0;
+    for (int i = 0; i < (int)samples.size(); ++i) {
+        int count = 0;
+        for (int j = 0; j < (int)samples.size(); ++j) {
+            if (i == j)
+                continue;
+            if (directionAngleDiff(samples[i].direction, samples[j].direction) <= threshold_rad)
+                ++count;
+        }
+        if (count > best_count ||
+            (count == best_count && count > 0 &&
+             (best_idx < 0 ||
+              samples[i].lane_order < samples[best_idx].lane_order ||
+              (samples[i].lane_order == samples[best_idx].lane_order &&
+               samples[i].group_index < samples[best_idx].group_index)))) {
+            best_idx = i;
+            best_count = count;
+        }
+    }
+
+    if (best_idx < 0 || best_count == 0)
+        return fallback;
+
+    std::vector<int> support;
+    support.push_back(best_idx);
+    for (int j = 0; j < (int)samples.size(); ++j) {
+        if (j == best_idx)
+            continue;
+        if (directionAngleDiff(samples[best_idx].direction, samples[j].direction) <= threshold_rad)
+            support.push_back(j);
+    }
+    return meanDirectionFromSupport(samples, support, fallback);
+}
+
+static void setEntryLaneDirection(Lane& lane, const Vec2d& direction) {
+    if (direction.norm() < 1e-10)
+        return;
+    Vec2d dir = direction.normalized();
+    auto& pts = lane.geometry.points;
+    if (pts.empty())
+        return;
+    Vec2d p = pts.back();
+    if (pts.size() == 1)
+        pts.insert(pts.begin(), p - dir);
+    else
+        pts.insert(pts.end() - 1, p - dir);
+}
+
+static void setExitLaneDirection(Lane& lane, const Vec2d& direction) {
+    if (direction.norm() < 1e-10)
+        return;
+    Vec2d dir = direction.normalized();
+    auto& pts = lane.geometry.points;
+    if (pts.empty())
+        return;
+    Vec2d p = pts.front();
+    if (pts.size() == 1)
+        pts.push_back(p + dir);
+    else
+        pts.insert(pts.begin() + 1, p + dir);
+}
+
+static void applyGroupUnifiedDirections(
+    IntersectionInput& input, const ConnectivityDirectionConfig& cfg) {
+    if (cfg.mode != ConnectivityDirectionMode::GroupUnified)
+        return;
+
+    std::unordered_map<LaneGroupId, Vec2d> group_dirs;
+    for (const auto& group : input.lane_groups)
+        group_dirs[group.id] = groupUnifiedDirection(
+            group, input.lanes, cfg.group_similarity_angle_deg);
+
+    for (const auto& group : input.lane_groups) {
+        auto it = group_dirs.find(group.id);
+        if (it == group_dirs.end())
+            continue;
+        for (const auto& lane_id : group.lanes) {
+            Lane* lane = findLaneById(input.lanes, lane_id);
+            if (!lane)
+                continue;
+            if (group.role == GroupRole::Entry)
+                setEntryLaneDirection(*lane, it->second);
+            else
+                setExitLaneDirection(*lane, it->second);
+        }
+    }
+}
+
 // ── GlobalCoordinator ─────────────────────────────────────────────────────────
 //  Generation order:
 //    Priority 0: Straight (anchor curves; generated first)
@@ -198,7 +381,10 @@ void GlobalCoordinator::addSoftObstacles(SDFField&,
 
 // ── ConnectivityGenerator ─────────────────────────────────────────────────────
 
-ConnectivityGenerator::ConnectivityGenerator(const LBFGSConfig& cfg) : solver_(cfg) {}
+ConnectivityGenerator::ConnectivityGenerator(
+    const LBFGSConfig& cfg,
+    const ConnectivityDirectionConfig& direction_cfg)
+    : solver_(cfg), direction_cfg_(direction_cfg) {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  buildSiblings
@@ -804,6 +990,7 @@ static bool tryPhysicalSafeSingleCubic(
 
     Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
     Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : Vec2d(1, 0);
+    bool require_topology_clear = (T0.dot(T1) < -0.5);
     BezierCurve best;
     bool have_best = false;
     int best_cross = std::numeric_limits<int>::max();
@@ -815,7 +1002,7 @@ static bool tryPhysicalSafeSingleCubic(
         if (curveSelfIntersectsBusiness(candidate, 1.0))
             continue;
         CurveRisk risk = assessCurveRisk(candidate, input, sdf, sampled_siblings);
-        if (risk.physical())
+        if (risk.physical() || (require_topology_clear && risk.sibling_crosses > 0))
             continue;
         double shape_score = std::abs(alpha - 0.40);
         if (!have_best ||
@@ -871,6 +1058,9 @@ static bool tryObstacleBypassCandidate(
         return false;
     along /= len;
     Vec2d perp{-along[1], along[0]};
+    Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
+    Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : Vec2d(1, 0);
+    bool require_topology_clear = (T0.dot(T1) < -0.5);
 
     BezierCurve best;
     bool have_best = false;
@@ -938,7 +1128,7 @@ static bool tryObstacleBypassCandidate(
                 if (candidate.empty() || curveSelfIntersectsBusiness(candidate, 1.0))
                     continue;
                 CurveRisk risk = assessCurveRisk(candidate, input, sdf, sampled_siblings);
-                if (risk.physical())
+                if (risk.physical() || (require_topology_clear && risk.sibling_crosses > 0))
                     continue;
                 double shape_score = clearance + 0.02 * candidate.arcLength() +
                     (side * center_lat >= 0.0 ? 0.0 : 0.4);
@@ -979,6 +1169,87 @@ static BezierCurve buildAlignedUTurn(
     BezierCurve c;
     c.segs.push_back(makeAlignedUTurnCubic(p0, T0, p1, T1, forward_scale, bias));
     return c;
+}
+
+static bool curveExceedsUTurnEnvelope(
+    const BezierCurve& curve, const BezierCurve& reference,
+    const Vec2d& p0, const Vec2d& p1) {
+    double ref_len = std::max(reference.arcLength(), (p1 - p0).norm());
+    double max_len = std::max(80.0, ref_len * 4.0);
+    if (curve.arcLength() > max_len)
+        return true;
+
+    Vec2d mid = 0.5 * (p0 + p1);
+    double max_radius = std::max(60.0, ref_len * 3.0);
+    for (const auto& pt : curve.sampleByArcLength(80)) {
+        if ((pt - mid).norm() > max_radius)
+            return true;
+    }
+    return false;
+}
+
+static bool tryBoundedUTurnCandidate(
+    const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
+    const IntersectionInput& input, const SDFField& sdf,
+    const std::vector<SampledSiblingCurve>& sampled_siblings,
+    const BezierCurve& reference, BezierCurve& out_curve) {
+    Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
+    Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : -T0;
+    Vec2d axis = T0 - T1;
+    if (axis.norm() < 1e-8)
+        axis = T0;
+    axis.normalize();
+
+    std::vector<Vec2d> dirs;
+    auto add_dir = [&](const Vec2d& raw) {
+        if (raw.norm() < 1e-8)
+            return;
+        Vec2d d = raw.normalized();
+        for (const auto& existing : dirs)
+            if (existing.dot(d) > 0.98)
+                return;
+        dirs.push_back(d);
+    };
+    add_dir(axis);
+    add_dir(-axis);
+    add_dir(Vec2d(-T0.y(), T0.x()));
+    add_dir(Vec2d(T0.y(), -T0.x()));
+
+    bool have_best = false;
+    BezierCurve best;
+    int best_cross = std::numeric_limits<int>::max();
+    double best_score = std::numeric_limits<double>::max();
+    double ref_len = reference.arcLength();
+    for (double scale : {0.85, 0.70, 0.55, 0.40, 1.0, 0.30}) {
+        for (const auto& dir : dirs) {
+            for (double mag : {0.0, 1.0, 2.0, 3.0, 4.5, 6.0}) {
+                BezierCurve candidate = buildAlignedUTurn(p0, t0, p1, t1, dir, mag, scale);
+                if (candidate.empty() || curveSelfIntersectsBusiness(candidate, 1.0))
+                    continue;
+                if (curveExceedsUTurnEnvelope(candidate, reference, p0, p1))
+                    continue;
+                CurveRisk risk = assessCurveRisk(candidate, input, sdf, sampled_siblings);
+                if (risk.physical())
+                    continue;
+                double score = std::abs(candidate.arcLength() - ref_len)
+                    + 3.0 * std::abs(scale - 0.85)
+                    + 0.2 * mag;
+                if (!have_best ||
+                    risk.sibling_crosses < best_cross ||
+                    (risk.sibling_crosses == best_cross && score < best_score)) {
+                    have_best = true;
+                    best = candidate;
+                    best_cross = risk.sibling_crosses;
+                    best_score = score;
+                }
+            }
+        }
+    }
+
+    if (!have_best)
+        return false;
+    out_curve = best;
+    return true;
 }
 
 ConnectivityCurve ConnectivityGenerator::generateOne(
@@ -1229,6 +1500,16 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
 
     bool skip_band = true; // always skip: preserve G1, rely on optimizer
     BezierCurve final_c = postProcess(opt, sdf, input.area.geometry, 0.25, t0, t1, skip_band, &p0, &p1);
+    bool shape_risk = is_uturn_geom && curveExceedsUTurnEnvelope(final_c, initial, p0, p1);
+    if (allow_uturn_search && shape_risk) {
+        BezierCurve fallback = initial;
+        if (tryBoundedUTurnCandidate(p0, t0, p1, t1, input, sdf, sampled_for_gate, initial, fallback)) {
+            final_c = fallback;
+        } else {
+            final_c = initial;
+        }
+        shape_risk = false;
+    }
     CurveRisk final_risk = assessCurveRisk(final_c, input, sdf, sampled_for_gate);
     if (final_risk.physical()) {
         BezierCurve repaired = final_c;
@@ -1239,7 +1520,7 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
         }
     }
     if (out_physical_risk) {
-        *out_physical_risk = final_risk.physical();
+        *out_physical_risk = final_risk.physical() || shape_risk;
     }
     cc.curve = std::make_shared<BezierCurve>(final_c);
     validate(cc, input, sdf);
@@ -1249,8 +1530,11 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
 }
 
 std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
-    const IntersectionInput& input, SDFField& sdf, double* out_ms) {
+    const IntersectionInput& raw_input, SDFField& sdf, double* out_ms) {
     auto t0 = std::chrono::steady_clock::now();
+    IntersectionInput input = raw_input;
+    applyGroupUnifiedDirections(input, direction_cfg_);
+
     bool pure_geometry = input.obstacles.empty()
         && input.boundaries.empty();
 

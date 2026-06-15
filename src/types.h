@@ -282,6 +282,16 @@ struct IntersectionInput {
 // ── AdaptiveRefineResult forward-declared here ───────────────
 struct SDFField; // forward
 
+enum class ConnectivityDirectionMode {
+    PerLane = 0,
+    GroupUnified = 1
+};
+
+struct ConnectivityDirectionConfig {
+    ConnectivityDirectionMode mode = ConnectivityDirectionMode::PerLane;
+    double group_similarity_angle_deg = 5.0;
+};
+
 struct LBFGSConfig {
     int max_iter = 80;
     int history_size = 10;

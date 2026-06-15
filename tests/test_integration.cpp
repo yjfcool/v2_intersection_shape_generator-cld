@@ -2,6 +2,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include "intersection_shape_generator.h"
 #include "constraints/fence_check.h"
+#include "generator/polygon_builder.h"
 #include "optimizer/sdf_field.h"
 
 #include "io/iodata_shapefile.h"
@@ -9,6 +10,15 @@
 using Catch::Matchers::WithinAbs;
 
 using namespace isg;
+
+static bool hasPolygonPointNear(
+    const std::vector<Vec2d>& pts, const Vec2d& expected, double tol = 1e-6) {
+    for (const auto& pt : pts) {
+        if ((pt - expected).norm() <= tol)
+            return true;
+    }
+    return false;
+}
 
 // ──────────────────────────────────────────────────────────────
 //  Minimal 2-direction intersection builder
@@ -132,6 +142,76 @@ TEST_CASE("Integration: start/end tangent G1 continuity", "[integration]") {
     REQUIRE(end_tan[0] > 0.7);
 }
 
+static IntersectionInput makeGroupedDirectionInput() {
+    IntersectionInput inp;
+
+    Lane e0; e0.id = "E0"; e0.width = 3.5; e0.groupId = "EG"; e0.laneOrder = 0;
+    e0.geometry.points = {Vec2d(-5, 0), Vec2d(0, 0)};
+    Lane e1; e1.id = "E1"; e1.width = 3.5; e1.groupId = "EG"; e1.laneOrder = 1;
+    e1.geometry.points = {Vec2d(-5, 2), Vec2d(0, 2)};
+    Lane e2; e2.id = "E2"; e2.width = 3.5; e2.groupId = "EG"; e2.laneOrder = 2;
+    e2.geometry.points = {Vec2d(-2, -6), Vec2d(0, 4)};
+
+    Lane x0; x0.id = "X0"; x0.width = 3.5; x0.groupId = "XG"; x0.laneOrder = 0;
+    x0.geometry.points = {Vec2d(10, 0), Vec2d(15, 0)};
+    Lane x1; x1.id = "X1"; x1.width = 3.5; x1.groupId = "XG"; x1.laneOrder = 1;
+    x1.geometry.points = {Vec2d(10, 2), Vec2d(15, 2)};
+    Lane x2; x2.id = "X2"; x2.width = 3.5; x2.groupId = "XG"; x2.laneOrder = 2;
+    x2.geometry.points = {Vec2d(10, 4), Vec2d(15, 4)};
+    inp.lanes = {e0, e1, e2, x0, x1, x2};
+
+    LaneGroup eg;
+    eg.id = "EG"; eg.role = GroupRole::Entry; eg.lanes = {"E0", "E1", "E2"};
+    LaneGroup xg;
+    xg.id = "XG"; xg.role = GroupRole::Exit; xg.lanes = {"X0", "X1", "X2"};
+    inp.lane_groups = {eg, xg};
+
+    for (int i = 0; i < 3; ++i) {
+        Connectivity c;
+        c.id = "C" + std::to_string(i);
+        c.entry_lane_id = "E" + std::to_string(i);
+        c.exit_lane_id = "X" + std::to_string(i);
+        c.enterGroupId = "EG";
+        c.exitGroupId = "XG";
+        c.turn_type = ConnTurnType::Straight;
+        inp.connectivities.push_back(c);
+    }
+
+    inp.area.geometry.outer = {{-1, -8}, {12, -8}, {12, 8}, {-1, 8}};
+    return inp;
+}
+
+static const ConnectivityCurve* findCurveByEntryLane(
+    const IntersectionOutput& out, const LaneId& entry_lane_id) {
+    for (const auto& cc : out.connectivity_curves)
+        if (cc.entry_lane_id == entry_lane_id)
+            return &cc;
+    return nullptr;
+}
+
+TEST_CASE("Integration: connectivity direction can be unified by lane group", "[integration]") {
+    auto inp = makeGroupedDirectionInput();
+
+    IntersectionShapeGenerator default_gen;
+    IntersectionOutput default_out;
+    REQUIRE(default_gen.generate(inp, default_out));
+    auto* default_curve = findCurveByEntryLane(default_out, "E2");
+    REQUIRE(default_curve);
+    REQUIRE(default_curve->curve);
+    REQUIRE(default_curve->curve->startTan().normalized().dot(Vec2d(1, 0)) < 0.5);
+
+    IntersectionShapeGenerator::Config cfg;
+    cfg.connectivity_direction.mode = ConnectivityDirectionMode::GroupUnified;
+    cfg.connectivity_direction.group_similarity_angle_deg = 5.0;
+    IntersectionShapeGenerator group_gen(cfg);
+    IntersectionOutput group_out;
+    REQUIRE(group_gen.generate(inp, group_out));
+    auto* group_curve = findCurveByEntryLane(group_out, "E2");
+    REQUIRE(group_curve);
+    REQUIRE(group_curve->curve);
+    REQUIRE(group_curve->curve->startTan().normalized().dot(Vec2d(1, 0)) > 0.95);
+}
+
 TEST_CASE("Integration: curve stays inside fence", "[integration]") {
     auto inp = makeTwoDirectionInput(false);
 
@@ -217,6 +297,76 @@ TEST_CASE("Integration: fine area is non-empty polygon", "[integration]") {
 
     REQUIRE_FALSE(out.area.geometry.outer.empty());
     REQUIRE(out.area.geometry.outer.size() >= 3);
+}
+
+TEST_CASE("Integration: lane group cut area is used without road boundaries", "[integration]") {
+    IntersectionInput inp;
+    inp.id = "no_road_boundary_group_cuts";
+    inp.area.geometry.outer = {{-2, -2}, {2, -2}, {2, 2}, {-2, 2}};
+
+    auto add_group = [&](const std::string& name,
+                         GroupRole role,
+                         const Vec2d& lane_outer,
+                         const Vec2d& lane_conn,
+                         const Vec2d& edge0_outer,
+                         const Vec2d& edge0_conn,
+                         const Vec2d& edge1_outer,
+                         const Vec2d& edge1_conn) {
+        Lane lane;
+        lane.id = name + "_L";
+        lane.groupId = name;
+        lane.laneOrder = 0;
+        lane.geometry.points = (role == GroupRole::Entry)
+            ? std::vector<Vec2d>{lane_outer, lane_conn}
+            : std::vector<Vec2d>{lane_conn, lane_outer};
+
+        LaneEdge e0;
+        e0.id = name + "_E0";
+        e0.groupId = name;
+        e0.lineOrder = 0;
+        e0.geometry.points = (role == GroupRole::Entry)
+            ? std::vector<Vec2d>{edge0_outer, edge0_conn}
+            : std::vector<Vec2d>{edge0_conn, edge0_outer};
+
+        LaneEdge e1;
+        e1.id = name + "_E1";
+        e1.groupId = name;
+        e1.lineOrder = 2;
+        e1.geometry.points = (role == GroupRole::Entry)
+            ? std::vector<Vec2d>{edge1_outer, edge1_conn}
+            : std::vector<Vec2d>{edge1_conn, edge1_outer};
+
+        LaneGroup group;
+        group.id = name;
+        group.role = role;
+        group.lanes = {lane.id};
+        group.boundaries = {e0.id, e1.id};
+
+        inp.lanes.push_back(lane);
+        inp.lane_edges.push_back(e0);
+        inp.lane_edges.push_back(e1);
+        inp.lane_groups.push_back(group);
+    };
+
+    add_group("WEST_ENTRY", GroupRole::Entry,
+              {-10, 0}, {-1, 0}, {-10, -1}, {-1, -1}, {-10, 1}, {-1, 1});
+    add_group("SOUTH_ENTRY", GroupRole::Entry,
+              {0, -10}, {0, -1}, {-1, -10}, {-1, -1}, {1, -10}, {1, -1});
+    add_group("EAST_EXIT", GroupRole::Exit,
+              {10, 0}, {1, 0}, {10, -1}, {1, -1}, {10, 1}, {1, 1});
+    add_group("NORTH_EXIT", GroupRole::Exit,
+              {0, 10}, {0, 1}, {-1, 10}, {-1, 1}, {1, 10}, {1, 1});
+
+    IntersectionAreaBuilder builder;
+    IntersectionArea area = builder.build(inp, {}, {});
+
+    REQUIRE(inp.boundaries.empty());
+    REQUIRE_FALSE(area.geometry.outer.empty());
+    REQUIRE(area.geometry.outer.size() >= 12);
+    REQUIRE(hasPolygonPointNear(area.geometry.outer, Vec2d(-0.95, 0.0)));
+    REQUIRE(hasPolygonPointNear(area.geometry.outer, Vec2d(1.05, 0.0)));
+    REQUIRE(hasPolygonPointNear(area.geometry.outer, Vec2d(0.0, -0.95)));
+    REQUIRE(hasPolygonPointNear(area.geometry.outer, Vec2d(0.0, 1.05)));
 }
 
 TEST_CASE("Integration: perf stats are populated", "[integration]") {

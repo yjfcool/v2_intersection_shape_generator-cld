@@ -226,6 +226,14 @@ void ClusterOrderSolver::detectTopologicalInversions(
         bool same_entry = (ca->enterGroupId == cb->enterGroupId);
         bool same_exit = (ca->exitGroupId == cb->exitGroupId);
 
+        // Curves sharing an actual lane endpoint may coincide at that endpoint
+        // only. They can fan out from a common entry or merge into a common exit
+        // without a topologically mandatory interior crossing, so keep them as
+        // constrained pairs with the wider shared-endpoint skip zone.
+        if ((!ca->entry_lane_id.empty() && ca->entry_lane_id == cb->entry_lane_id) ||
+            (!ca->exit_lane_id.empty() && ca->exit_lane_id == cb->exit_lane_id))
+            continue;
+
         if (same_entry) {
             auto ira = entry_cluster_rank_.find(pair.id_a);
             auto irb = entry_cluster_rank_.find(pair.id_b);

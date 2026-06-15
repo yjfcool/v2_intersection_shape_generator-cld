@@ -135,13 +135,13 @@ bool IntersectionShapeGenerator::generate(const IntersectionInput& input, Inters
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
     double opt_ms = 0;
-    ConnectivityGenerator cgen(cfg_.lbfgs);
+    ConnectivityGenerator cgen(cfg_.lbfgs, cfg_.connectivity_direction);
     output.connectivity_curves = cgen.generate(norm_input, sdf, &opt_ms);
     output.perf.optimize_ms = opt_ms;
 
     auto te = std::chrono::steady_clock::now();
-    EdgeLineGenerator elgen;
-    output.lane_edges = elgen.generate(norm_input, output.connectivity_curves);
+    //EdgeLineGenerator elgen;
+    //output.lane_edges = elgen.generate(norm_input, output.connectivity_curves);
     output.perf.edge_gen_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - te).count();
 
