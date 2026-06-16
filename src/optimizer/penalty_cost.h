@@ -14,6 +14,7 @@ struct SiblingCurve {
     int expected_side = 0;     // +1: sibling LEFT of current; -1: RIGHT; 0: unknown
     Vec2d ref_perp{0, 0};   // pair-specific fixed lateral axis
     bool shared_endpoint = false; // shared exit lane (same entry group): wider skip zone
+    bool fixed_shape = false; // sibling comes from preserved input Connectivity.geometry
 };
 
 struct PenaltyWeights {

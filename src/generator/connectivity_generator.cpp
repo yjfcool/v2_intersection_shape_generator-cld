@@ -400,7 +400,8 @@ ConnectivityGenerator::ConnectivityGenerator(
 std::vector<SiblingCurve> ConnectivityGenerator::buildSiblings(
     const ConnId& id, const std::unordered_map<ConnId,BezierCurve>& done,
     const ClusterOrderSolver& cs, const std::vector<Connectivity>& conns,
-    bool constrained_only) const {
+    bool constrained_only,
+    const std::unordered_set<ConnId>* fixed_shape_ids) const {
     std::vector<SiblingCurve> sibs;
     for (auto& kv : done) {
         auto& cid = kv.first;
@@ -410,6 +411,7 @@ std::vector<SiblingCurve> ConnectivityGenerator::buildSiblings(
 
         SiblingCurve s;
         s.curve = curve;
+        s.fixed_shape = fixed_shape_ids && fixed_shape_ids->count(cid) > 0;
 
         auto ex = cs.exemptionOf(id, cid);
         bool in_cluster = cs.pairExists(id, cid);
@@ -652,6 +654,66 @@ static std::unordered_map<ConnId, BezierCurve> curveMapFromResults(
         if (cc.curve)
             curves[cc.id] = *cc.curve;
     return curves;
+}
+
+static bool hasFixedGeometry(const Connectivity& conn) {
+    return conn.geometry.points.size() >= 2;
+}
+
+static BezierCurve fixedGeometryToCurve(
+    const Connectivity& conn, const IntersectionInput& input) {
+    (void)input;
+    BezierCurve curve;
+    const auto& pts = conn.geometry.points;
+    if (pts.size() < 2)
+        return curve;
+
+    for (int i = 0; i + 1 < (int)pts.size(); ++i) {
+        Vec2d chord = pts[i + 1] - pts[i];
+        double len = chord.norm();
+        if (len < 1e-8)
+            continue;
+        Vec2d seg_dir = chord / len;
+        curve.segs.push_back(makeCubicG1(pts[i], seg_dir, pts[i + 1], seg_dir, 1.0 / 3.0));
+    }
+    return curve;
+}
+
+static ConnectivityCurve makeFixedGeometryCurve(
+    const Connectivity& conn, const IntersectionInput& input, const SDFField& sdf) {
+    ConnectivityCurve cc;
+    cc.id = conn.id;
+    cc.entry_lane_id = conn.entry_lane_id;
+    cc.exit_lane_id = conn.exit_lane_id;
+    cc.turn_type = conn.turn_type;
+    cc.geometry = conn.geometry;
+    BezierCurve curve = fixedGeometryToCurve(conn, input);
+    if (!curve.empty())
+        cc.curve = std::make_shared<BezierCurve>(curve);
+
+    if (cc.curve) {
+        double ms = minSDFAlongCurveAdaptive(*cc.curve, sdf);
+        cc.violation.max_obstacle_penetration = std::max(0.0, -ms);
+        Vec2d obstacle_hit;
+        if (curveIntersectsObstacles(*cc.curve, input.obstacles, &obstacle_hit)) {
+            cc.violation.max_obstacle_penetration =
+                std::max(cc.violation.max_obstacle_penetration, 0.01);
+            cc.violation.reason = "fixed geometry intersects obstacle";
+            cc.status = CurveStatus::Degraded;
+        }
+    }
+    return cc;
+}
+
+static bool fixedGeometryHitsObstacle(
+    const Connectivity& conn, const IntersectionInput& input, const SDFField& sdf) {
+    if (!hasFixedGeometry(conn))
+        return false;
+    BezierCurve curve = fixedGeometryToCurve(conn, input);
+    if (curve.empty())
+        return false;
+    (void)sdf;
+    return curveIntersectsObstacles(curve, input.obstacles, nullptr);
 }
 
 struct SampledCurve {
@@ -968,14 +1030,28 @@ struct CurveRisk {
     }
 };
 
+static void setConnectivityCurveGeometry(
+    ConnectivityCurve& cc, const BezierCurve& curve, const LineString2d* fixed_geometry = nullptr) {
+    cc.curve = std::make_shared<BezierCurve>(curve);
+    cc.geometry.points.clear();
+    if (fixed_geometry && fixed_geometry->points.size() >= 2) {
+        cc.geometry = *fixed_geometry;
+        return;
+    }
+    if (!curve.empty()) {
+        int n = std::max(2, std::min(240, (int)std::ceil(curve.arcLength() / 0.3) + 1));
+        cc.geometry.points = curve.sampleByArcLength(n);
+    }
+}
+
 static CurveRisk assessCurveRisk(
     const BezierCurve& curve, const IntersectionInput& input, const SDFField& sdf,
-    const std::vector<SampledSiblingCurve>& sampled_siblings) {
+    const std::vector<SampledSiblingCurve>& sampled_siblings, bool include_fence = true) {
     CurveRisk risk;
     double ms = minSDFAlongCurveAdaptive(curve, sdf);
     risk.obstacle = curveIntersectsObstacles(curve, input.obstacles) || (ms < 0.0);
     risk.boundary = curveIntersectsBoundaries(curve, input.boundaries);
-    risk.fence = (!input.area.is_rough && curveLeavesFence(curve, input.area.geometry));
+    risk.fence = include_fence && (!input.area.is_rough && curveLeavesFence(curve, input.area.geometry));
     risk.sibling_crosses = sampledSiblingCrossCount(curve, sampled_siblings, true, 1.5);
     return risk;
 }
@@ -1018,6 +1094,239 @@ static bool tryPhysicalSafeSingleCubic(
     if (!have_best)
         return false;
     curve = best;
+    return true;
+}
+
+static bool tryShapeSafeSingleCubic(
+    const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
+    const IntersectionInput& input, const SDFField& sdf,
+    const std::vector<SampledSiblingCurve>& sampled_siblings, bool include_fence,
+    BezierCurve& curve) {
+    double chord_len = (p1 - p0).norm();
+    if (chord_len < 1e-6)
+        return false;
+    bool shape_bad = curve.maxCurvature(20) > 2.0 ||
+        curve.arcLength() > std::max(chord_len * 1.8, chord_len + 12.0);
+    if (!shape_bad)
+        return false;
+
+    Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : (p1 - p0).normalized();
+    Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : (p1 - p0).normalized();
+    BezierCurve best = curve;
+    CurveRisk best_risk = assessCurveRisk(best, input, sdf, sampled_siblings, include_fence);
+    double best_score = 1000.0 * best_risk.sibling_crosses + best.maxCurvature(20) + 0.02 * best.arcLength();
+    bool improved = false;
+
+    for (double alpha : {0.18, 0.22, 0.26, 0.30, 0.34, 0.38, 0.42, 0.12, 0.08}) {
+        BezierCurve candidate;
+        candidate.segs.push_back(makeCubicG1(p0, T0, p1, T1, alpha));
+        if (curveSelfIntersectsBusiness(candidate, 1.0))
+            continue;
+        CurveRisk risk = assessCurveRisk(candidate, input, sdf, sampled_siblings, include_fence);
+        if (risk.physical())
+            continue;
+        double score = 1000.0 * risk.sibling_crosses + candidate.maxCurvature(20) + 0.02 * candidate.arcLength();
+        if (score + 1e-6 < best_score) {
+            best = candidate;
+            best_score = score;
+            improved = true;
+            if (risk.sibling_crosses == 0 && candidate.maxCurvature(20) < 1.0)
+                break;
+        }
+    }
+
+    if (!improved)
+        return false;
+    curve = best;
+    return true;
+}
+
+static const Connectivity* findConnectivityById(
+    const std::vector<Connectivity>& conns, const ConnId& id) {
+    for (const auto& conn : conns)
+        if (conn.id == id)
+            return &conn;
+    return nullptr;
+}
+
+static std::unordered_map<ConnId, std::vector<ConnId>> constrainedNeighborMap(
+    const std::vector<ConnectivityCurve>& results, const ClusterOrderSolver& cs) {
+    auto idx = resultIndexById(results);
+    std::unordered_map<ConnId, std::vector<ConnId>> neighbors;
+    for (const auto& p : cs.pairs()) {
+        if (p.exempt == CrossExemption::StructuralCross)
+            continue;
+        auto ia = idx.find(p.id_a), ib = idx.find(p.id_b);
+        if (ia == idx.end() || ib == idx.end())
+            continue;
+        if (!results[ia->second].curve || !results[ib->second].curve)
+            continue;
+        neighbors[p.id_a].push_back(p.id_b);
+        neighbors[p.id_b].push_back(p.id_a);
+    }
+    return neighbors;
+}
+
+static int constrainedCrossCountForId(
+    const ConnId& id, const BezierCurve& curve,
+    const std::vector<ConnectivityCurve>& results,
+    const std::unordered_map<ConnId, size_t>& result_idx,
+    const std::unordered_map<ConnId, std::vector<ConnId>>& neighbors,
+    double endpoint_tol = 1.5) {
+    int count = 0;
+    auto nit = neighbors.find(id);
+    if (nit == neighbors.end())
+        return 0;
+    for (const auto& other : nit->second) {
+        auto it = result_idx.find(other);
+        if (it == result_idx.end())
+            continue;
+        const auto& other_cc = results[it->second];
+        if (!other_cc.curve)
+            continue;
+        if (curvesIntersectBusiness(curve, *other_cc.curve, endpoint_tol))
+            ++count;
+    }
+    return count;
+}
+
+static Vec2d dominantConstrainedRefPerpForId(
+    const ConnId& id, const BezierCurve& curve,
+    const std::vector<ConnectivityCurve>& results,
+    const std::unordered_map<ConnId, size_t>& result_idx,
+    const std::unordered_map<ConnId, std::vector<ConnId>>& neighbors,
+    const ClusterOrderSolver& cs,
+    double endpoint_tol = 1.5) {
+    auto nit = neighbors.find(id);
+    if (nit == neighbors.end())
+        return Vec2d(0, 0);
+    for (const auto& other : nit->second) {
+        auto it = result_idx.find(other);
+        if (it == result_idx.end())
+            continue;
+        const auto& other_cc = results[it->second];
+        if (!other_cc.curve)
+            continue;
+        if (!curvesIntersectBusiness(curve, *other_cc.curve, endpoint_tol))
+            continue;
+        Vec2d ref = cs.refPerpOf(id, other);
+        if (ref.norm() > 1e-8)
+            return ref.normalized();
+    }
+    return Vec2d(0, 0);
+}
+
+static std::unordered_set<ConnId> collectPureGeometryRepairIds(
+    const std::vector<ConnectivityCurve>& results, const ClusterOrderSolver& cs,
+    const std::unordered_set<ConnId>& preserved_fixed_ids,
+    double endpoint_tol = 1.5) {
+    std::unordered_set<ConnId> repair_ids;
+    auto idx = resultIndexById(results);
+    for (const auto& p : cs.pairs()) {
+        if (p.exempt == CrossExemption::StructuralCross)
+            continue;
+        auto ia = idx.find(p.id_a), ib = idx.find(p.id_b);
+        if (ia == idx.end() || ib == idx.end())
+            continue;
+        const auto& ca = results[ia->second];
+        const auto& cb = results[ib->second];
+        if (!ca.curve || !cb.curve)
+            continue;
+        if (!curvesIntersectBusiness(*ca.curve, *cb.curve, endpoint_tol))
+            continue;
+        ConnId repair_id = ia->second > ib->second ? p.id_a : p.id_b;
+        if (!preserved_fixed_ids.count(repair_id))
+            repair_ids.insert(repair_id);
+    }
+    return repair_ids;
+}
+
+static bool tryPureGeometryTopologyRepair(
+    const Connectivity& conn, const IntersectionInput& input,
+    const std::vector<ConnectivityCurve>& results,
+    const std::unordered_map<ConnId, size_t>& result_idx,
+    const std::unordered_map<ConnId, std::vector<ConnId>>& neighbors,
+    const ClusterOrderSolver& cs,
+    BezierCurve& out_curve) {
+    auto it = result_idx.find(conn.id);
+    if (it == result_idx.end() || !results[it->second].curve)
+        return false;
+
+    auto _entry = input.entryPtDir(conn.entry_lane_id);
+    Vec2d p0 = _entry.first;
+    Vec2d t0 = _entry.second;
+    auto _exit = input.exitPtDir(conn.exit_lane_id);
+    Vec2d p1 = _exit.first;
+    Vec2d t1 = _exit.second;
+    Vec2d chord = p1 - p0;
+    if (chord.norm() < 1e-6)
+        return false;
+    const BezierCurve& current = *results[it->second].curve;
+    int best_cross = constrainedCrossCountForId(
+        conn.id, current, results, result_idx, neighbors, 1.5);
+    if (best_cross <= 0)
+        return false;
+
+    Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : chord.normalized();
+    Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : chord.normalized();
+    BezierCurve best = current;
+    double best_shape = current.maxCurvature(20) + 0.02 * current.arcLength();
+    bool improved = false;
+
+    auto consider = [&](BezierCurve candidate) {
+        if (candidate.empty() || curveSelfIntersectsBusiness(candidate, 1.0))
+            return;
+
+        int cross_count = constrainedCrossCountForId(
+            conn.id, candidate, results, result_idx, neighbors, 1.5);
+        double shape = candidate.maxCurvature(20) + 0.02 * candidate.arcLength();
+        if (cross_count < best_cross ||
+            (cross_count == best_cross && shape + 1e-6 < best_shape)) {
+            best = std::move(candidate);
+            best_cross = cross_count;
+            best_shape = shape;
+            improved = true;
+        }
+    };
+
+    for (double alpha : {0.10, 0.12, 0.14, 0.16, 0.18, 0.22, 0.26, 0.30, 0.34}) {
+        BezierCurve candidate;
+        candidate.segs.push_back(makeCubicG1(p0, T0, p1, T1, alpha));
+        consider(candidate);
+        if (best_cross == 0)
+            break;
+    }
+
+    Vec2d ref_perp = dominantConstrainedRefPerpForId(
+        conn.id, current, results, result_idx, neighbors, cs, 1.5);
+    if (best_cross > 0 && ref_perp.norm() > 1e-8) {
+        double chord_len = chord.norm();
+        for (double alpha : {0.18, 0.22, 0.26, 0.30, 0.34, 0.38, 0.42}) {
+            double handle = std::max(0.05, alpha) * chord_len;
+            for (double side : {-1.0, 1.0}) {
+                for (double offset : {0.75, 1.25, 1.8, 2.5, 3.4, 4.5, 6.0}) {
+                    BezierSegment seg;
+                    seg.ctrl[0] = p0;
+                    seg.ctrl[1] = p0 + T0 * handle + ref_perp * (side * offset);
+                    seg.ctrl[2] = p1 - T1 * handle + ref_perp * (side * offset);
+                    seg.ctrl[3] = p1;
+                    BezierCurve candidate;
+                    candidate.segs.push_back(seg);
+                    consider(candidate);
+                    if (best_cross == 0)
+                        break;
+                }
+                if (best_cross == 0)
+                    break;
+            }
+            if (best_cross == 0)
+                break;
+        }
+    }
+
+    if (!improved)
+        return false;
+    out_curve = best;
     return true;
 }
 
@@ -1188,6 +1497,39 @@ static bool curveExceedsUTurnEnvelope(
     return false;
 }
 
+static double curveLateralBulge(
+    const BezierCurve& curve, const Vec2d& p0, const Vec2d& p1) {
+    Vec2d chord = p1 - p0;
+    if (chord.norm() < 1e-8)
+        return 0.0;
+    Vec2d perp{-chord.y(), chord.x()};
+    perp.normalize();
+    double best = 0.0;
+    for (const auto& pt : curve.sampleByArcLength(80)) {
+        double v = (pt - p0).dot(perp);
+        if (std::abs(v) > std::abs(best))
+            best = v;
+    }
+    return best;
+}
+
+static bool curveCollapsesUTurnEnvelope(
+    const BezierCurve& curve, const BezierCurve& reference,
+    const Vec2d& p0, const Vec2d& p1) {
+    double ref_len = reference.arcLength();
+    double chord_len = (p1 - p0).norm();
+    double ref_bulge = std::abs(curveLateralBulge(reference, p0, p1));
+    double cur_bulge = std::abs(curveLateralBulge(curve, p0, p1));
+
+    if (ref_len > 1.0 && curve.arcLength() < std::max(chord_len * 1.08, ref_len * 0.72))
+        return true;
+    if (ref_bulge > 2.0 && cur_bulge < ref_bulge * 0.50)
+        return true;
+    if (curve.maxCurvature(20) > std::max(1.0, reference.maxCurvature(20) * 8.0))
+        return true;
+    return false;
+}
+
 static bool tryBoundedUTurnCandidate(
     const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
     const IntersectionInput& input, const SDFField& sdf,
@@ -1227,6 +1569,8 @@ static bool tryBoundedUTurnCandidate(
                 if (candidate.empty() || curveSelfIntersectsBusiness(candidate, 1.0))
                     continue;
                 if (curveExceedsUTurnEnvelope(candidate, reference, p0, p1))
+                    continue;
+                if (curveCollapsesUTurnEnvelope(candidate, reference, p0, p1))
                     continue;
                 CurveRisk risk = assessCurveRisk(candidate, input, sdf, sampled_siblings);
                 if (risk.physical())
@@ -1276,6 +1620,7 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     double lw = 3.5;
     if (auto* l = input.findLane(conn.entry_lane_id))
         lw = l->width;
+    bool enforce_fence = !(input.obstacles.empty() && input.boundaries.empty());
 
     // ── Build initial curve with sibling topology awareness ──────────────────
     //
@@ -1330,7 +1675,7 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
                     alpha));
                 if (curveSelfIntersectsBusiness(candidate, 1.0))
                     continue;
-                if (assessCurveRisk(candidate, input, sdf, ensure_sampled_siblings()).physical())
+                if (assessCurveRisk(candidate, input, sdf, ensure_sampled_siblings(), enforce_fence).physical())
                     continue;
                 int cross_count = sampledSiblingCrossCount(candidate, ensure_sampled_siblings(), true, 1.5);
                 if (cross_count < current_cross ||
@@ -1378,7 +1723,7 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
             }
             if (arc_ok) {
                 BezierCurve c_short; c_short.segs.push_back(shorter);
-                if (assessCurveRisk(c_short, input, sdf, ensure_sampled_siblings()).physical())
+                if (assessCurveRisk(c_short, input, sdf, ensure_sampled_siblings(), enforce_fence).physical())
                     continue;
                 int cross_count = sampledSiblingCrossCount(c_short, ensure_sampled_siblings(), true, 1.5);
                 if (cross_count < best_cross ||
@@ -1451,8 +1796,22 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     }
 
     const auto& sampled_for_gate = ensure_sampled_siblings();
-    CurveRisk risk = assessCurveRisk(initial, input, sdf, sampled_for_gate);
-    bool needs_optimization = risk.physical();
+    CurveRisk risk = assessCurveRisk(initial, input, sdf, sampled_for_gate, enforce_fence);
+    bool fixed_shape_cross = false;
+    if (risk.sibling_crosses > 0) {
+        auto current_sample = sampleCurveForIntersections(initial);
+        for (const auto& sib : siblings) {
+            if (!sib.fixed_shape || sib.exempt_a1)
+                continue;
+            auto fixed_sample = sampleCurveForIntersections(sib.curve);
+            if (sampledCurvesIntersectBusiness(current_sample, fixed_sample, 1.5)) {
+                fixed_shape_cross = true;
+                break;
+            }
+        }
+    }
+    bool needs_optimization = risk.physical() || fixed_shape_cross ||
+        (allow_uturn_search && risk.sibling_crosses > 0);
     if (out_physical_risk)
         *out_physical_risk = false;
     PreCheckResult pre;
@@ -1463,14 +1822,32 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     }
 
     if (!needs_optimization) {
-        cc.curve = std::make_shared<BezierCurve>(initial);
+        if (!is_uturn_geom)
+            tryShapeSafeSingleCubic(p0, t0, p1, t1, input, sdf, sampled_for_gate, enforce_fence, initial);
+        setConnectivityCurveGeometry(cc, initial);
         validate(cc, input, sdf);
         return cc;
     }
 
+    if (is_uturn_geom) {
+        BezierCurve bounded_uturn = initial;
+        if (tryBoundedUTurnCandidate(
+                p0, t0, p1, t1, input, sdf, sampled_for_gate, initial, bounded_uturn)) {
+            setConnectivityCurveGeometry(cc, bounded_uturn);
+            validate(cc, input, sdf);
+            return cc;
+        }
+        setConnectivityCurveGeometry(cc, initial);
+        validate(cc, input, sdf);
+        if (out_physical_risk)
+            *out_physical_risk = true;
+        return cc;
+    }
+
     BezierCurve safe_single = initial;
-    if (tryPhysicalSafeSingleCubic(p0, t0, p1, t1, input, sdf, sampled_for_gate, safe_single)) {
-        cc.curve = std::make_shared<BezierCurve>(safe_single);
+    if (!is_uturn_geom &&
+        tryPhysicalSafeSingleCubic(p0, t0, p1, t1, input, sdf, sampled_for_gate, safe_single)) {
+        setConnectivityCurveGeometry(cc, safe_single);
         validate(cc, input, sdf);
         return cc;
     }
@@ -1478,7 +1855,7 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     BezierCurve bypass_candidate = initial;
     if (tryObstacleBypassCandidate(
             p0, t0, p1, t1, input, sdf, sampled_for_gate, bypass_candidate)) {
-        cc.curve = std::make_shared<BezierCurve>(bypass_candidate);
+        setConnectivityCurveGeometry(cc, bypass_candidate);
         validate(cc, input, sdf);
         return cc;
     }
@@ -1488,7 +1865,7 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     cost.proto = initial;
     cost.sdf = &sdf;
     cost.boundaries = input.boundaries;
-    if (!input.area.is_rough)
+    if (enforce_fence && !input.area.is_rough)
         cost.fence = input.area.geometry;
     cost.siblings = siblings;
     cost.obstacle_clearance = 0.0;
@@ -1500,7 +1877,9 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
 
     bool skip_band = true; // always skip: preserve G1, rely on optimizer
     BezierCurve final_c = postProcess(opt, sdf, input.area.geometry, 0.25, t0, t1, skip_band, &p0, &p1);
-    bool shape_risk = is_uturn_geom && curveExceedsUTurnEnvelope(final_c, initial, p0, p1);
+    bool shape_risk = is_uturn_geom &&
+        (curveExceedsUTurnEnvelope(final_c, initial, p0, p1) ||
+         curveCollapsesUTurnEnvelope(final_c, initial, p0, p1));
     if (allow_uturn_search && shape_risk) {
         BezierCurve fallback = initial;
         if (tryBoundedUTurnCandidate(p0, t0, p1, t1, input, sdf, sampled_for_gate, initial, fallback)) {
@@ -1510,19 +1889,21 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
         }
         shape_risk = false;
     }
-    CurveRisk final_risk = assessCurveRisk(final_c, input, sdf, sampled_for_gate);
+    CurveRisk final_risk = assessCurveRisk(final_c, input, sdf, sampled_for_gate, enforce_fence);
     if (final_risk.physical()) {
         BezierCurve repaired = final_c;
         if (tryObstacleBypassCandidate(
                 p0, t0, p1, t1, input, sdf, sampled_for_gate, repaired)) {
             final_c = repaired;
-            final_risk = assessCurveRisk(final_c, input, sdf, sampled_for_gate);
+            final_risk = assessCurveRisk(final_c, input, sdf, sampled_for_gate, enforce_fence);
         }
     }
+    if (!is_uturn_geom)
+        tryShapeSafeSingleCubic(p0, t0, p1, t1, input, sdf, sampled_for_gate, enforce_fence, final_c);
     if (out_physical_risk) {
         *out_physical_risk = final_risk.physical() || shape_risk;
     }
-    cc.curve = std::make_shared<BezierCurve>(final_c);
+    setConnectivityCurveGeometry(cc, final_c);
     validate(cc, input, sdf);
     if (pre.narrow_passage && cc.status == CurveStatus::OK)
         cc.status = CurveStatus::WarnA2;
@@ -1566,13 +1947,27 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
     }
     std::unordered_map<ConnId, BezierCurve> done;
     std::unordered_set<ConnId> physical_risk_ids;
+    std::unordered_set<ConnId> preserved_fixed_ids;
+    for (const auto& conn : input.connectivities) {
+        if (!hasFixedGeometry(conn) || fixedGeometryHitsObstacle(conn, input, sdf))
+            continue;
+        auto cc = makeFixedGeometryCurve(conn, input, sdf);
+        if (cc.curve) {
+            done[conn.id] = *cc.curve;
+            preserved_fixed_ids.insert(conn.id);
+        }
+        results.push_back(std::move(cc));
+    }
+
     for (auto& group : coord.groups()) {
         for (auto& cid : group.conn_ids) {
+            if (preserved_fixed_ids.count(cid))
+                continue;
             auto* conn = cmap[cid];
             if (!conn) continue;
 
             auto sibs = buildSiblings(
-                cid, done, cluster_solver_, input.connectivities, pure_geometry);
+                cid, done, cluster_solver_, input.connectivities, pure_geometry, &preserved_fixed_ids);
 
             bool phys_risk = false;
             auto cc = generateOne(*conn, input, sdf, sdf_coarse, sibs, false, &phys_risk);
@@ -1589,6 +1984,33 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
     }
 
     if (pure_geometry) {
+        auto result_idx = resultIndexById(results);
+        auto neighbors = constrainedNeighborMap(results, cluster_solver_);
+        for (int pass = 0; pass < 2; ++pass) {
+            auto repair_ids = collectPureGeometryRepairIds(
+                results, cluster_solver_, preserved_fixed_ids, 1.5);
+            if (repair_ids.empty())
+                break;
+            bool changed = false;
+            for (const auto& cid : repair_ids) {
+                auto ri = result_idx.find(cid);
+                if (ri == result_idx.end())
+                    continue;
+                const Connectivity* conn = findConnectivityById(input.connectivities, cid);
+                if (!conn)
+                    continue;
+                BezierCurve repaired;
+                if (!tryPureGeometryTopologyRepair(
+                        *conn, input, results, result_idx, neighbors, cluster_solver_, repaired))
+                    continue;
+                setConnectivityCurveGeometry(results[ri->second], repaired);
+                validate(results[ri->second], input, sdf);
+                changed = true;
+            }
+            if (!changed)
+                break;
+        }
+        annotateClusterCrossings(results, cluster_solver_, 1.5);
         if (out_ms) {
             *out_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
@@ -1598,22 +2020,24 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
 
     auto result_idx = resultIndexById(results);
     std::unordered_map<ConnId, BezierCurve> all_done = curveMapFromResults(results);
-    for (int repair_pass = 0; repair_pass < 2; ++repair_pass) {
+    for (int repair_pass = 0; repair_pass < 3; ++repair_pass) {
         auto bad = crossingIdsTouchingSeeds(results, cluster_solver_, physical_risk_ids, 1.5);
         if (bad.empty())
             break;
         int repaired_count = 0;
-        int max_repairs = (int)input.connectivities.size();
+        int max_repairs = std::min(12, (int)input.connectivities.size());
         for (auto git = coord.groups().rbegin(); git != coord.groups().rend(); ++git) {
             for (auto& cid : git->conn_ids) {
                 if (!bad.count(cid))
+                    continue;
+                if (preserved_fixed_ids.count(cid))
                     continue;
                 if (repaired_count >= max_repairs)
                     break;
                 auto* conn = cmap[cid];
                 if (!conn)
                     continue;
-                auto sibs = buildSiblings(cid, all_done, cluster_solver_, input.connectivities);
+                auto sibs = buildSiblings(cid, all_done, cluster_solver_, input.connectivities, false, &preserved_fixed_ids);
                 bool phys_risk = false;
                 auto cc = generateOne(*conn, input, sdf, sdf_coarse, sibs, true, &phys_risk);
                 auto ri = result_idx.find(cid);

@@ -170,6 +170,7 @@ ConnectivityCurve makeFallbackCurve(const PreCheckResult& pre, const Connectivit
         BezierCurve c;
         c.segs.push_back(seg);
         out.curve = std::make_shared<BezierCurve>(c);
+        out.geometry.points = {p0, p1};
         out.status = CurveStatus::Degraded;
         out.violation.reason = "Sandwich or narrow; degraded to straight";
     }

@@ -4,6 +4,7 @@
 #include "curve/curve_utils.h"
 #include "intersection_shape_generator.h"
 #include "io/iodata_json.h"
+#include "optimizer/sdf_field.h"
 
 #include <string>
 #include <unordered_map>
@@ -48,6 +49,25 @@ static std::string joinPairs(const std::vector<std::string>& pairs) {
         s += p;
     }
     return s;
+}
+
+static const Connectivity* findConnectivity(const IntersectionInput& input, const ConnId& id) {
+    for (const auto& conn : input.connectivities)
+        if (conn.id == id)
+            return &conn;
+    return nullptr;
+}
+
+static BezierCurve straightCurveFromLineString(const LineString2d& line) {
+    BezierCurve curve;
+    for (int i = 0; i + 1 < (int)line.points.size(); ++i) {
+        Vec2d d = line.points[i + 1] - line.points[i];
+        if (d.norm() < 1e-8)
+            continue;
+        Vec2d dir = d.normalized();
+        curve.segs.push_back(makeCubicG1(line.points[i], dir, line.points[i + 1], dir, 1.0 / 3.0));
+    }
+    return curve;
 }
 
 TEST_CASE("intersection_input has no avoidable same-cluster interior crossings", "[regression][cluster]") {
@@ -121,6 +141,77 @@ TEST_CASE("100000643 obstacle reroute preserves same-cluster U-turn topology", "
     CHECK_FALSE(curvesIntersectBusiness(*curves["75"]->curve, *curves["77"]->curve, 1.5));
 }
 
+TEST_CASE("100000643 preserves non-obstacle fixed connectivity geometry", "[regression][fixed-geometry]") {
+    const std::string path = std::string(PROJECT_ROOT_DIR) + "/datas/100000643.json";
+    IntersectionInput input = IntersectionIO::loadFromFile(path);
+
+    const Connectivity* c83 = findConnectivity(input, "83");
+    const Connectivity* c90 = findConnectivity(input, "90");
+    REQUIRE(c83);
+    REQUIRE(c90);
+    REQUIRE(c83->geometry.points.size() == 2);
+    REQUIRE(c90->geometry.points.size() == 2);
+
+    IntersectionShapeGenerator gen;
+    IntersectionOutput output;
+    REQUIRE(gen.generate(input, output));
+
+    auto curves = curveMap(output);
+    REQUIRE(curves.count("83") == 1);
+    REQUIRE(curves["83"]->curve);
+    REQUIRE(curves["83"]->geometry.points.size() == c83->geometry.points.size());
+    for (size_t i = 0; i < c83->geometry.points.size(); ++i)
+        CHECK((curves["83"]->geometry.points[i] - c83->geometry.points[i]).norm() < 1e-8);
+    CHECK((curves["83"]->curve->startPt() - c83->geometry.points.front()).norm() < 1e-8);
+    CHECK((curves["83"]->curve->endPt() - c83->geometry.points.back()).norm() < 1e-8);
+
+    SDFField hard_sdf;
+    hard_sdf.build(input.area.geometry.bbox(), input.obstacles, 0.2, 0.0);
+    BezierCurve fixed90 = straightCurveFromLineString(c90->geometry);
+    REQUIRE_FALSE(fixed90.empty());
+    CHECK(minSDFAlongCurve(fixed90, hard_sdf, 80) < 0.0);
+
+    REQUIRE(curves.count("90") == 1);
+    REQUIRE(curves["90"]->curve);
+    CHECK(minSDFAlongCurve(*curves["90"]->curve, hard_sdf, 80) >= -0.05);
+}
+
+TEST_CASE("100000643-1 keeps straight shapes and reported cluster pairs separated", "[regression][cluster][shape]") {
+    const std::string path = std::string(PROJECT_ROOT_DIR) + "/datas/100000643-1.json";
+    IntersectionInput input = IntersectionIO::loadFromFile(path);
+
+    IntersectionShapeGenerator gen;
+    IntersectionOutput output;
+    REQUIRE(gen.generate(input, output));
+
+    auto curves = curveMap(output);
+    for (const ConnId& id : {"76", "86"}) {
+        REQUIRE(curves.count(id) == 1);
+        REQUIRE(curves[id]->curve);
+    }
+
+    CHECK(curves["76"]->curve->arcLength() < 36.0);
+    CHECK(curves["76"]->curve->maxCurvature(20) < 0.2);
+    CHECK(curves["86"]->curve->arcLength() < 38.0);
+    CHECK(curves["86"]->curve->maxCurvature(20) < 0.3);
+
+    auto bad_pairs = avoidableSameClusterCrossings(input, output);
+    INFO("avoidable same-cluster crossings: " << joinPairs(bad_pairs));
+    CHECK(bad_pairs.empty());
+
+    for (const auto& ids : std::vector<std::pair<ConnId, ConnId>>{
+             {"96", "98"},
+             {"112", "114"},
+         }) {
+        REQUIRE(curves.count(ids.first) == 1);
+        REQUIRE(curves.count(ids.second) == 1);
+        REQUIRE(curves[ids.first]->curve);
+        REQUIRE(curves[ids.second]->curve);
+        INFO("reported same-cluster pair must not cross: " << ids.first << "-" << ids.second);
+        CHECK_FALSE(curvesIntersectBusiness(*curves[ids.first]->curve, *curves[ids.second]->curve, 1.5));
+    }
+}
+
 TEST_CASE("100000643 group-unified direction keeps large U-turn bounded", "[regression][cluster][obstacle][direction]") {
     const std::string path = std::string(PROJECT_ROOT_DIR) + "/datas/100000643.json";
     IntersectionInput input = IntersectionIO::loadFromFile(path);
@@ -149,4 +240,29 @@ TEST_CASE("100000643 group-unified direction keeps large U-turn bounded", "[regr
     CHECK(min_x > 0.0);
     CHECK_FALSE(curvesIntersectBusiness(*curves["71"]->curve, *curves["77"]->curve, 1.5));
     CHECK_FALSE(curvesIntersectBusiness(*curves["75"]->curve, *curves["77"]->curve, 1.5));
+}
+
+TEST_CASE("100000643 U-turn arches stay between adjacent same-cluster curves", "[regression][cluster][uturn]") {
+    const std::string path = std::string(PROJECT_ROOT_DIR) + "/datas/100000643.json";
+    IntersectionInput input = IntersectionIO::loadFromFile(path);
+
+    IntersectionShapeGenerator gen;
+    IntersectionOutput output;
+    REQUIRE(gen.generate(input, output));
+
+    auto curves = curveMap(output);
+    for (const ConnId& id : {"71", "75", "77", "92", "100", "108"}) {
+        REQUIRE(curves.count(id) == 1);
+        REQUIRE(curves[id]->curve);
+    }
+
+    CHECK(curves["77"]->curve->arcLength() > 24.0);
+    CHECK(curves["77"]->curve->maxCurvature(20) < 0.5);
+    CHECK(curves["100"]->curve->arcLength() > 24.0);
+    CHECK(curves["100"]->curve->maxCurvature(20) < 0.5);
+
+    CHECK_FALSE(curvesIntersectBusiness(*curves["71"]->curve, *curves["77"]->curve, 1.5));
+    CHECK_FALSE(curvesIntersectBusiness(*curves["75"]->curve, *curves["77"]->curve, 1.5));
+    CHECK_FALSE(curvesIntersectBusiness(*curves["92"]->curve, *curves["100"]->curve, 1.5));
+    CHECK_FALSE(curvesIntersectBusiness(*curves["100"]->curve, *curves["108"]->curve, 1.5));
 }

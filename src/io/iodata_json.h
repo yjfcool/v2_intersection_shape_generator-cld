@@ -6,6 +6,8 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
+#include <algorithm>
+#include <cmath>
 
 namespace isg {
 
@@ -297,6 +299,9 @@ inline nlohmann::json connectivityToJson(const Connectivity& conn) {
     j["turn_type"] = static_cast<int>(conn.turn_type);
     j["enterGroupId"] = conn.enterGroupId;
     j["exitGroupId"] = conn.exitGroupId;
+    if (!conn.geometry.points.empty()) {
+        j["geometry"] = lineString2dToJson(conn.geometry);
+    }
 
     return j;
 }
@@ -320,6 +325,9 @@ inline Connectivity connectivityFromJson(const nlohmann::json& j) {
     }
     if (j.contains("exitGroupId")) {
         conn.exitGroupId = j["exitGroupId"].get<std::string>();
+    }
+    if (j.contains("geometry")) {
+        conn.geometry = lineString2dFromJson(j["geometry"]);
     }
 
     return conn;
@@ -509,6 +517,14 @@ inline nlohmann::json connectivityCurveToJson(const ConnectivityCurve& cc) {
     j["entry_lane_id"] = cc.entry_lane_id;
     j["exit_lane_id"] = cc.exit_lane_id;
     j["turn_type"] = static_cast<int>(cc.turn_type);
+    LineString2d geometry = cc.geometry;
+    if (geometry.points.empty() && cc.curve) {
+        int n = std::max(2, std::min(240, (int)std::ceil(cc.curve->arcLength() / 0.3) + 1));
+        geometry.points = cc.curve->sampleByArcLength(n);
+    }
+    if (!geometry.points.empty()) {
+        j["geometry"] = lineString2dToJson(geometry);
+    }
     j["status"] = static_cast<int>(cc.status);
     j["violation"] = violationInfoToJson(cc.violation);
     j["left_edge_id"] = cc.left_edge_id;
@@ -530,6 +546,9 @@ inline ConnectivityCurve connectivityCurveFromJson(const nlohmann::json& j) {
     }
     if (j.contains("turn_type")) {
         cc.turn_type = static_cast<ConnTurnType>(j["turn_type"].get<int>());
+    }
+    if (j.contains("geometry")) {
+        cc.geometry = lineString2dFromJson(j["geometry"]);
     }
     if (j.contains("status")) {
         cc.status = static_cast<CurveStatus>(j["status"].get<int>());

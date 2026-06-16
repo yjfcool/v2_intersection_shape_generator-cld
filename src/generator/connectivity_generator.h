@@ -4,6 +4,7 @@
 #include "optimizer/lbfgs_solver.h"
 #include "constraints/cluster_order.h"
 #include "utils/quadtree.h"
+#include <unordered_set>
 
 namespace isg {
 
@@ -44,7 +45,8 @@ private:
     std::vector<SiblingCurve> buildSiblings(
         const ConnId& id, const std::unordered_map<ConnId, BezierCurve>& done,
         const ClusterOrderSolver& cs, const std::vector<Connectivity>& conns,
-        bool constrained_only = false) const;
+        bool constrained_only = false,
+        const std::unordered_set<ConnId>* fixed_shape_ids = nullptr) const;
 
     BezierCurve postProcess(
         const BezierCurve& c, const SDFField& sdf, const Polygon2d& fence, double kmax,

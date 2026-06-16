@@ -17,10 +17,13 @@ int main(int argc, char* argv[]) {
             std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_ds.json",
             std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_jd.json",
             std::string(PROJECT_ROOT_DIR) + "/datas/" + "intersection_cross.json",
-            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
             std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643-0.json",
             std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598.json",
             std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000643-1.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000598-1.json",
+            std::string(PROJECT_ROOT_DIR) + "/datas/" + "100000699-1.json",
         };
     }
 

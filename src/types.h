@@ -172,6 +172,9 @@ struct Connectivity {
 
     LaneGroupId enterGroupId;
     LaneGroupId exitGroupId;
+
+    LineString2d geometry; //固有形态,可以为空或不输入: 通常是已生成好特定形态曲线,除非穿障必须避障时可重新生成曲线外,
+                            //其他场景不能修改固有形态; 非空(坐标数>=2)时在同簇非交约束和避障时都需要额外考虑此固有形态影响
 };
 
 struct Obstacle {
@@ -224,6 +227,7 @@ struct ConnectivityCurve {
     LaneId exit_lane_id;
     ConnTurnType turn_type = ConnTurnType::Straight;
     std::shared_ptr<BezierCurve> curve = nullptr; // BezierCurve is complete above
+    LineString2d geometry;
     CurveStatus status = CurveStatus::OK;
     ViolationInfo violation;
 
@@ -288,7 +292,7 @@ enum class ConnectivityDirectionMode {
 };
 
 struct ConnectivityDirectionConfig {
-    ConnectivityDirectionMode mode = ConnectivityDirectionMode::PerLane;
+    ConnectivityDirectionMode mode = ConnectivityDirectionMode::GroupUnified;
     double group_similarity_angle_deg = 5.0;
 };
 
