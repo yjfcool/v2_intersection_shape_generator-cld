@@ -111,45 +111,53 @@ ValidationReport validateTopology(const IntersectionInput& input) {
 }
 
 bool IntersectionShapeGenerator::generate(const IntersectionInput& input, IntersectionOutput& output) {
-    IntersectionInput norm_input = normalizeConnectivityGroups(input);
-    report_ = validateTopology(norm_input);
-    if (!report_.is_valid())
-        return false;
+    try {
+        IntersectionInput norm_input = normalizeConnectivityGroups(input);
+        report_ = validateTopology(norm_input);
+        if (!report_.is_valid())
+            return false;
 
-    auto t0 = std::chrono::steady_clock::now();
-    SDFField sdf;
-    BoundingBox2d roi;
-    if (!norm_input.area.geometry.outer.empty())
-        roi = norm_input.area.geometry.bbox();
-    else {
-        for (auto& l : norm_input.lanes) {
-            for (auto& p : l.geometry.points)
-                roi.expand(p);
+        auto t0 = std::chrono::steady_clock::now();
+        SDFField sdf;
+        BoundingBox2d roi;
+        if (!norm_input.area.geometry.outer.empty())
+            roi = norm_input.area.geometry.bbox();
+        else {
+            for (auto& l : norm_input.lanes) {
+                for (auto& p : l.geometry.points)
+                    roi.expand(p);
+            }
+            roi.min_pt -= Vec2d(20, 20);
+            roi.max_pt += Vec2d(20, 20);
         }
-        roi.min_pt -= Vec2d(20, 20);
-        roi.max_pt += Vec2d(20, 20);
+        if (!norm_input.obstacles.empty())
+            sdf.build(roi, norm_input.obstacles, cfg_.sdf_cell_size, cfg_.obstacle_buffer);
+        output.perf.sdf_build_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+        double opt_ms = 0;
+        ConnectivityGenerator cgen(cfg_.lbfgs, cfg_.connectivity_direction);
+        output.connectivity_curves = cgen.generate(norm_input, sdf, &opt_ms);
+        output.perf.optimize_ms = opt_ms;
+
+        auto te = std::chrono::steady_clock::now();
+        //EdgeLineGenerator elgen;
+        //output.lane_edges = elgen.generate(norm_input, output.connectivity_curves);
+        output.perf.edge_gen_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - te).count();
+
+        auto ta = std::chrono::steady_clock::now();
+        IntersectionAreaBuilder areabuilder;
+        output.area = areabuilder.build(norm_input, output.connectivity_curves, output.lane_edges);
+        output.perf.area_gen_ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
+
+    } catch (...) {
+        output.connectivity_curves.clear();
+        output.lane_edges.clear();
+        output.area = IntersectionArea();
+        return false;
     }
-    if (!norm_input.obstacles.empty())
-        sdf.build(roi, norm_input.obstacles, cfg_.sdf_cell_size, cfg_.obstacle_buffer);
-    output.perf.sdf_build_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-
-    double opt_ms = 0;
-    ConnectivityGenerator cgen(cfg_.lbfgs, cfg_.connectivity_direction);
-    output.connectivity_curves = cgen.generate(norm_input, sdf, &opt_ms);
-    output.perf.optimize_ms = opt_ms;
-
-    auto te = std::chrono::steady_clock::now();
-    //EdgeLineGenerator elgen;
-    //output.lane_edges = elgen.generate(norm_input, output.connectivity_curves);
-    output.perf.edge_gen_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - te).count();
-
-    auto ta = std::chrono::steady_clock::now();
-    IntersectionAreaBuilder areabuilder;
-    output.area = areabuilder.build(norm_input, output.connectivity_curves, output.lane_edges);
-    output.perf.area_gen_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
     return true;
 }
 
