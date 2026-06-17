@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  L-BFGS with strong-Wolfe line search
+//  L-BFGS求解器: 带Strong-Wolfe线搜索
 // ─────────────────────────────────────────────────────────────────────────────
 #include "lbfgs_solver.h"
 #include <cmath>
@@ -8,8 +8,7 @@
 
 namespace isg {
 
-// ── Cubic interpolation for interval [a, b] ──────────────────────────────────
-// Finds minimiser of cubic through (a, fa, ga) and (b, fb, gb) in [a,b].
+// 区间[a, b]的三次插值:在[a,b]中求解过(a,fa,ga)与(b,fb,gb)的三次函数极小点。
 static double cubicMinimiser(double a, double fa, double ga, double b, double fb, double gb) {
     double d1 = ga + gb - 3.0 * (fb - fa) / (b - a);
     double d2sq = d1 * d1 - ga * gb;
@@ -19,7 +18,7 @@ static double cubicMinimiser(double a, double fa, double ga, double b, double fb
     return std::max(a + 0.1 * (b - a), std::min(b - 0.1 * (b - a), t)); // clamp in (a,b)
 }
 
-// ── Strong-Wolfe line search ──────────────────────────────────────────────────
+// Strong-Wolfe线搜索
 double LBFGSSolver::lineSearch(
     CostFn& fn, const VecXd& x, const VecXd& dir,
     double f0, const VecXd& g0, VecXd& xn, double& fn_val, VecXd& gn, int& evals) {
@@ -27,7 +26,7 @@ double LBFGSSolver::lineSearch(
     const double c2 = cfg_.wolfe_c2;
     double derphi0 = g0.dot(dir);
 
-    // Non-descent direction guard — revert to steepest descent step
+    // 非下降方向保护 — 退回到最速下降步
     if (derphi0 >= 0) {
         xn = x - 1e-4 * g0;
         fn_val = fn(xn, gn);
@@ -56,7 +55,7 @@ double LBFGSSolver::lineSearch(
         bool non_descent = (iter > 0 && f_cur >= f_prev);
 
         if (armijo_fail || non_descent) {
-            // Zoom into [alpha_prev, alpha]
+            // 在[alpha_prev, alpha]内收缩
             double a_lo = alpha_prev, f_lo = f_prev;
             double a_hi = alpha;
             VecXd g_lo(g0.size()), g_hi(g_cur);
@@ -86,7 +85,7 @@ double LBFGSSolver::lineSearch(
                     a_lo = a_j;
                 }
             }
-            // Return best found so far
+            // 返回目前找到的最佳值
             gn = g_cur;
             fn_val = f_lo;
             return a_lo;
@@ -94,13 +93,13 @@ double LBFGSSolver::lineSearch(
 
         double dp = g_cur.dot(dir);
         if (std::abs(dp) <= -c2 * derphi0) {
-            // Strong Wolfe satisfied
+            // Strong Wolfe条件满足
             gn = g_cur;
             fn_val = f_cur;
             return alpha;
         }
         if (dp >= 0) {
-            // Zoom into [alpha, alpha_prev]
+            // 在[alpha, alpha_prev]内收缩
             double a_lo = alpha, f_lo = f_cur;
             VecXd g_lo = g_cur;
             for (int z = 0; z < 8; ++z) {
@@ -128,19 +127,19 @@ double LBFGSSolver::lineSearch(
 
         alpha_prev = alpha;
         f_prev = f_cur;
-        // Expand: try larger step (cubic extrapolation)
+        // 扩展: 尝试更大步长(三次外推)
         double new_alpha = std::min(alpha * 2.5, alpha_max);
         alpha = new_alpha;
         if (alpha < 1e-15)
             break;
     }
-    // Fallback: return whatever we have
+    // 回退: 返回当前最优
     gn = g_cur;
     fn_val = f_cur;
     return alpha;
 }
 
-// ── L-BFGS two-loop recursion ──────────────────────────────────────────────
+// L-BFGS双循环递归
 SolveResult LBFGSSolver::solve(CostFn fn, const VecXd& x0) {
     const int n = (int)x0.size();
     VecXd x = x0, g(n);
@@ -161,7 +160,7 @@ SolveResult LBFGSSolver::solve(CostFn fn, const VecXd& x0) {
             break;
         }
 
-        // ── Two-loop L-BFGS direction ─────────────────────────────────────
+        // 双循环L-BFGS方向
         const int m = (int)sv.size();
         VecXd q = g;
         std::vector<double> alpha_arr(m);
@@ -170,7 +169,7 @@ SolveResult LBFGSSolver::solve(CostFn fn, const VecXd& x0) {
             q -= alpha_arr[i] * yv[i];
         }
 
-        // Initial Hessian scaling: γ = sᵀy / yᵀy
+        // 初始Hessian缩放: γ = sᵀy / yᵀy
         VecXd r = q;
         if (m > 0) {
             double sy = sv.back().dot(yv.back());
@@ -185,19 +184,18 @@ SolveResult LBFGSSolver::solve(CostFn fn, const VecXd& x0) {
 
         VecXd dir = -r;
 
-        // ── Line search ───────────────────────────────────────────────────
+        // 线搜索
         VecXd xn(n), gn(n);
         double fn_val = f;
         double alpha = lineSearch(fn, x, dir, f, g, xn, fn_val, gn, evals);
         (void)alpha;
-
-        // ── Update history ────────────────────────────────────────────────
+        // 更新历史
         VecXd s = xn - x;
         VecXd y = gn - g;
         double sy = s.dot(y);
 
         if (sy > 1e-20) {
-            // skip update if curvature condition not met
+            // 不满足曲率条件时跳过更新
             if ((int)sv.size() == cfg_.history_size) {
                 sv.pop_front();
                 yv.pop_front();

@@ -36,11 +36,11 @@ static Vec2d clampTangent(const Vec2d& tan, const Vec2d& ref, double max_a) {
                  ref[0] * sa * sg + ref[1] * ca);
 }
 
-// SDF-sampled straight line clearance check.
-// clearance is the minimum acceptable SDF value along the line.
-// Use clearance=0.0 to only detect actual physical penetration (SDF<0),
-// which avoids false-triggering bypass for lanes that merely pass close
-// to an obstacle but do not physically cross it.
+// SDF采样直线间隙检查。
+// clearance 为线上最小可接受SDF值。
+// clearance=0.0 仅检测实际物理穿透(SDF<0),
+// 避免对仅从障碍物附近经过但不实际交叉的车道误触发绕行。
+
 static bool straightLineClear(
     const SDFField& sdf, const Vec2d& p0, const Vec2d& p1, double clearance = 0.0, int n = 40) {
     if (!sdf.valid()) return true;
@@ -55,9 +55,9 @@ static bool straightLineClear(
 // ─────────────────────────────────────────────────────────────────────────────
 //  Level-1: Geometric Direct Construction (方案A)
 // ─────────────────────────────────────────────────────────────────────────────
-// Union-AABB of all obstacle buffered geometries visible to the SDF field.
-// We probe the SDF along the direct path to find the obstacle's bounding box
-// without needing obstacle polygon data (SDF is already available).
+// SDF场中所有障碍物缓冲几何的AABB并集。
+// 沿直线路径探测SDF以发现障碍物包围盒,
+// 无需障碍物多边形数据(SDF已可用)。
 struct ObstacleAABB {
     double x_min, x_max, y_min, y_max;
     bool valid = false;
@@ -65,7 +65,7 @@ struct ObstacleAABB {
 
 static ObstacleAABB probeObstacleAABB(
     const SDFField& sdf, const Vec2d& p0, const Vec2d& p1, double clearance = 0.0) {
-    // Sample dense grid in the neighbourhood of the direct path
+    // 在直线路径附近采样稠密网格
     ObstacleAABB box;
     box.x_min = box.y_min = 1e18;
     box.x_max = box.y_max = -1e18;
@@ -76,10 +76,10 @@ static ObstacleAABB probeObstacleAABB(
     if (len < 1e-6) return box;
     along = along * (1.0 / len);
     Vec2d perp{-along[1], along[0]};
-    // Sweep width: use a fixed narrow strip (one lane width = 3.5m each side)
-    // to avoid capturing obstacles far off the path axis.  A large sweep
-    // caused the AABB to span the entire junction when multiple obstacles exist,
-    // making obs_lat unreliable for side selection.
+    // 扫描宽度: 固定窄带(每侧一个车道宽=3.5m)
+    // 避免捕获远偏路径轴的障碍物。大扫描范围
+    // 在多障碍物时使AABB跨越整个路口,
+    
     double sweep = 4.0; // ±4m from path centre-line
 
     for (int ix = 0; ix <= nx; ++ix) {
@@ -100,9 +100,9 @@ static ObstacleAABB probeObstacleAABB(
     return box;
 }
 
-// Compute the bypass apex point for a given side (+1 = left of path, -1 = right).
-// Apex is placed at the obstacle's maximum lateral projection + clearance,
-// at the longitudinal midpoint of the obstacle along the path.
+// 计算指定侧的绕行apex点(+1=路径左侧, -1=右侧)。
+// apex位于障碍物最大横向投影+间隙处,
+// 沿路径方向的障碍物纵向中点。
 static Vec2d computeApex(
     const ObstacleAABB& box, const Vec2d& p0, const Vec2d& p1, int side, double clearance) {
     Vec2d along = (p1 - p0);
@@ -111,10 +111,10 @@ static Vec2d computeApex(
     along = along * (1.0 / len);
     Vec2d perp{-along[1], along[0]}; // left normal (unit vector)
 
-    // Longitudinal midpoint of obstacle box (world coords → project onto path axis)
-    // The box stores world coordinates of sampled points, so we must project
-    // all four corners onto the path tangent and perpendicular axes.
-    // Corners of the axis-aligned world box:
+    // 障碍物包围盒纵向中点(世界坐标 → 投影到路径轴)
+    // 包围盒存储采样点的世界坐标,需将
+    
+    // 轴对齐世界包围盒的角点:
     double corners_x[4] = {box.x_min, box.x_max, box.x_max, box.x_min};
     double corners_y[4] = {box.y_min, box.y_min, box.y_max, box.y_max};
 
@@ -130,24 +130,24 @@ static Vec2d computeApex(
         lat_max = std::max(lat_max, lat);
     }
 
-    // Longitudinal midpoint of obstacle, clamped to [20%, 80%] of path
+    // 障碍物纵向中点, 钳制到路径[20%, 80%]区间
     double path_lon_0 = p0.dot(along);
     double path_lon_1 = p1.dot(along);
     double lon_mid_obs = 0.5 * (lon_min + lon_max);
     double frac = (lon_mid_obs - path_lon_0) / (path_lon_1 - path_lon_0 + 1e-12);
     frac = std::max(0.2, std::min(0.8, frac));
 
-    // Lateral edge of obstacle on chosen side + clearance
+    // 障碍物在选定侧的横向边缘 + 间隙
     double lat_edge = (side > 0) ? (lat_max + clearance) : (lat_min - clearance);
 
-    // Apex: move from the path along perp to the required lateral position
+    // apex: 从路径沿法向移动到所需横向位置
     Vec2d base = p0 + frac * (p1 - p0);
     double base_lat = base.dot(perp);
     Vec2d apex = base + (lat_edge - base_lat) * perp;
     return apex;
 }
 
-// Choose which side (left/right of path) is clear for bypass.
+// 选择路径哪一侧(左/右)可绕行。
 //
 // Right-hand traffic rules (RHT) and junction-centre preference:
 //

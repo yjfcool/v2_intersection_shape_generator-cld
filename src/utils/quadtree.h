@@ -8,18 +8,20 @@ namespace isg {
 
 struct BoundingBox2d;
 
-// Custom make_unique for C++11 compatibility
+/// C++11兼容的make_unique
 template<typename T, typename... Args>
 std::unique_ptr<T> make_unique_cpp11(Args&&... args) {
     return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
 }
 
+/// 四叉树空间索引：用于加速Bezier曲线的范围查询
 class QuadTree {
 public:
+    /// 四叉树节点
     struct Node {
         BoundingBox2d bounds;
-        std::vector<std::pair<BezierCurve, std::string>> curves; // pair of curve and ID
-        std::unique_ptr<Node> children[4]; // NW, NE, SW, SE
+        std::vector<std::pair<BezierCurve, std::string>> curves;  ///< (曲线, ID)
+        std::unique_ptr<Node> children[4];  ///< NW, NE, SW, SE 四个子节点
         bool divided = false;
 
         Node(const BoundingBox2d& b) : bounds(b) {
@@ -32,8 +34,8 @@ public:
 
 private:
     std::unique_ptr<Node> root_;
-    size_t capacity_;
-    size_t depth_limit_;
+    size_t capacity_;     ///< 节点容量，超过则细分
+    size_t depth_limit_;  ///< 最大深度
 
 public:
     QuadTree(const BoundingBox2d& bounds, size_t capacity = 8, size_t depth_limit = 8)
@@ -41,8 +43,13 @@ public:
         root_ = make_unique_cpp11<Node>(bounds);
     }
 
+    /// 插入曲线
     void insert(const BezierCurve& curve, const std::string& id);
+
+    /// 范围查询：返回与查询包围盒相交的所有曲线
     std::vector<std::pair<BezierCurve, std::string>> queryRange(const BoundingBox2d& range) const;
+
+    /// 清空四叉树
     void clear();
 
 private:

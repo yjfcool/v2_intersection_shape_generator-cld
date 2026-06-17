@@ -4,6 +4,7 @@
 
 namespace isg {
 
+/// 点是否在多边形内（射线法，支持洞）
 static bool polygonContains(const Polygon2d& poly, const Vec2d& pt) {
     auto& ring = poly.outer;
     int n = (int)ring.size();
@@ -24,6 +25,7 @@ static bool polygonContains(const Polygon2d& poly, const Vec2d& pt) {
     return inside;
 }
 
+/// 点到多边形外环的最短距离
 static double pointToPolygonDist(const Vec2d& pt, const Polygon2d& poly) {
     auto& ring = poly.outer;
     int n = (int)ring.size();
@@ -37,6 +39,7 @@ static double pointToPolygonDist(const Vec2d& pt, const Polygon2d& poly) {
     return m;
 }
 
+/// 曲线是否穿越任一边界线
 static bool curveIntersectsBoundary(const BezierCurve& c, const std::vector<Boundary>& bds, int sps = 25) {
     std::vector<Vec2d> cp;
     for (auto& seg : c.segs)
@@ -50,6 +53,7 @@ static bool curveIntersectsBoundary(const BezierCurve& c, const std::vector<Boun
     return false;
 }
 
+/// 曲线是否完全位于围栏内
 static bool curveInsideFence(const BezierCurve& c, const Polygon2d& fence, int sps = 25) {
     if (fence.outer.empty()) return true;
     for (auto& seg : c.segs)

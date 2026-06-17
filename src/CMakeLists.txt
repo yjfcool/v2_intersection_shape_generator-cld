@@ -31,8 +31,18 @@ else ()
 endif ()
 
 target_compile_options(intersection_gen_lib PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -O2>
-        $<$<CXX_COMPILER_ID:MSVC>:/W3 /O2>
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>
+        $<$<CXX_COMPILER_ID:MSVC>:/W3>
+)
+
+# 性能优化: 不在CMakeLists中硬编码-O2, 由CMAKE_BUILD_TYPE控制
+# - Debug: -g -Og -DNDEBUG (优化调试, 性能接近Release)
+# - Release: -O3 -DNDEBUG
+# - RelWithDebInfo: -O2 -g -DNDEBUG
+target_compile_options(intersection_gen_lib PRIVATE
+        $<$<CONFIG:Debug>:-g -Og -DNDEBUG>
+        $<$<CONFIG:Release>:-O3 -DNDEBUG>
+        $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>
 )
 
 # 添加测试用例应用程序

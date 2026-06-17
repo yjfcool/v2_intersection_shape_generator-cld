@@ -19,11 +19,12 @@ static constexpr double DEG2RAD = PI / 180.0;
 static constexpr double RAD2DEG = 180.0 / PI;
 static constexpr double EPS = 1e-9;
 
-// ── Inline math helpers ──────────────────────────────────────
+// 内联数学工具
 inline double dot(const Vec2d& a, const Vec2d& b) { return a[0] * b[0] + a[1] * b[1]; }
 inline double cross2d(const Vec2d& a, const Vec2d& b) { return a[0] * b[1] - a[1] * b[0]; }
 inline double dist(const Vec2d& a, const Vec2d& b) { return (a - b).norm(); }
 
+/// 两向量夹角（弧度）
 inline double angleBetween(const Vec2d& a, const Vec2d& b) {
     double c = a.normalized().dot(b.normalized());
     return std::acos(std::max(-1.0, std::min(1.0, c)));
@@ -146,37 +147,18 @@ inline bool polylinesIntersectExcludeEndpoints(
     return false;
 }
 
-// 折线按arc-length重采样，间距spacing
+/// 折线按弧长重采样，固定间距spacing
 inline std::vector<Vec2d> resampleBySpacing(const std::vector<Vec2d>& src, double spacing) {
     if (src.size() < 2 || spacing < EPS)
         return src;
     std::vector<Vec2d> out;
-    out.push_back(src.front());
-    double acc = 0;
-    for (size_t i = 1; i < src.size(); ++i) {
-        double seg = dist(src[i - 1], src[i]);
-        double t = 0;
-        while (acc + seg - t >= spacing) {
-            double dt = spacing - (acc - t * 0);
-            // 实际上：累积到下一个采样点
-            double need = spacing - acc;
-            if (need < 0)
-                need += spacing;
-            // 简化：逐点累积
-            (void)dt;
-            break;
-        }
-        acc += seg;
-    }
-    // 重写：正确实现
-    out.clear();
     out.push_back(src.front());
     double traveled = 0;
     double nextSample = spacing;
     for (size_t i = 1; i < src.size(); ++i) {
         double seg = dist(src[i - 1], src[i]);
         while (traveled + seg >= nextSample) {
-            double t = (nextSample - traveled) / seg;
+            double t = (nextSample - traveled) / std::max(seg, EPS);
             Vec2d p = src[i - 1] * (1 - t) + src[i] * t;
             out.push_back(p);
             nextSample += spacing;
@@ -218,15 +200,16 @@ inline double polygonSignedArea(const std::vector<Vec2d>& poly) {
 
 inline double polygonArea(const std::vector<Vec2d>& p) { return std::abs(polygonSignedArea(p)); }
 
-// ── Line geometry helpers ───────────────────────────────────
-// Entry line: geometry runs outside→intersection; last point is at intersection edge.
-// Exit  line: geometry runs intersection→outside; first point is at intersection edge.
+// ── 车道几何辅助 ─────────────────────────────────────────────
+/// 进入车道：geometry 从外向路口，末点为路口端点
+/// 退出车道：geometry 从路口向外，首点为路口端点
 inline Vec2d getConnPoint(const std::vector<Vec2d>& points, bool is_entryline) {
     if (points.size() < 1)
         return Vec2d(0, 0);
     return is_entryline ? points.back() : points.front();
 }
 
+/// 获取车道端点切向（指向路口内/外）
 inline Vec2d getConnTangent(const std::vector<Vec2d>& points, bool is_entryline) {
     int n = points.size();
     if (n < 2)
@@ -235,16 +218,19 @@ inline Vec2d getConnTangent(const std::vector<Vec2d>& points, bool is_entryline)
     return d.norm() > 1e-10 ? d.normalized() : Vec2d(1, 0);
 }
 
+/// 同时获取车道端点与切向
 inline std::pair<Vec2d, Vec2d> getConnInfo(const std::vector<Vec2d>& points, bool is_entryline) {
     return {getConnPoint(points, is_entryline), getConnTangent(points, is_entryline)};
 }
 
+/// 进入车道末点
 inline Vec2d entryLinePoint(const std::vector<Vec2d>& points) {
     if (points.size() < 1)
         return Vec2d(0, 0);
     return points.back();
 }
 
+/// 进入车道末点切向
 inline Vec2d entryLineTangent(const std::vector<Vec2d>& points) {
     int n = (int)points.size();
     if (n < 2)
@@ -253,12 +239,14 @@ inline Vec2d entryLineTangent(const std::vector<Vec2d>& points) {
     return d.norm() > 1e-10 ? d.normalized() : Vec2d(1, 0);
 }
 
+/// 退出车道首点
 inline Vec2d exitLinePoint(const std::vector<Vec2d>& points) {
     if (points.size() < 1)
         return Vec2d(0, 0);
     return points.front();
 }
 
+/// 退出车道首点切向
 inline Vec2d exitLineTangent(const std::vector<Vec2d>& points) {
     int n = (int)points.size();
     if (n < 2)

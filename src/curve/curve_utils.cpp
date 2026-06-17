@@ -50,23 +50,23 @@ std::vector<Vec2d> elasticBandSmooth(const std::vector<Vec2d>& pts, const SDFFie
     return res;
 }
 
-// Adaptive version with variable sample count based on curve characteristics
+// 自适应版本: 根据曲线特征调整采样数
 std::vector<Vec2d> elasticBandSmoothAdaptive(const std::vector<Vec2d>& pts, const SDFField& sdf,
                                              const Polygon2d& fence, double km, double ms, int mi, double msc) {
     if (pts.size() < 3) return pts;
 
-    // Calculate curve length to determine initial sample count
+    // 计算曲线长度确定初始采样数
     double curve_length = 0.0;
     for (size_t i = 1; i < pts.size(); ++i) {
         curve_length += (pts[i] - pts[i-1]).norm();
     }
 
-    // Base sample count based on length, with bounds
+    // 基于长度的基准采样数,带上下界
     int initial_samples = std::max(10, std::min(200, static_cast<int>(curve_length / 0.5)));
 
-    // Estimate curvature variation for adaptive sampling
+    // 估计曲率变化以指导自适应采样
     double total_curvature = 0.0;
-    int curvature_samples = std::min(static_cast<int>(pts.size()), 20); // Limit samples for efficiency
+    int curvature_samples = std::min(static_cast<int>(pts.size()), 20); // 限制采样数以提高效率
     for (int i = 1; i < curvature_samples - 1; ++i) {
         double k = localCurvature(pts[std::min(i-1, static_cast<int>(pts.size()-1))],
                                   pts[i],
@@ -74,11 +74,11 @@ std::vector<Vec2d> elasticBandSmoothAdaptive(const std::vector<Vec2d>& pts, cons
         total_curvature += k;
     }
 
-    // Adjust sample count based on curvature
+    // 根据曲率调整采样数
     double avg_curvature = total_curvature / std::max(1, curvature_samples - 2);
     int adaptive_samples = std::max(10, static_cast<int>(initial_samples * (1.0 + avg_curvature * 0.5)));
 
-    // Downsample if we have too many points
+    // 点过多时抽稀
     std::vector<Vec2d> current_pts = pts;
     if (current_pts.size() > adaptive_samples) {
         current_pts = downsamplePoints(current_pts, adaptive_samples);
@@ -87,7 +87,7 @@ std::vector<Vec2d> elasticBandSmoothAdaptive(const std::vector<Vec2d>& pts, cons
     int N = (int)current_pts.size();
     if (N < 3) return current_pts;
 
-    // Use early termination based on improvement threshold
+    // 基于改进阈值的早停
     double improvement_threshold = 1e-4;
     std::vector<Vec2d> prev_pts = current_pts;
 
@@ -251,8 +251,9 @@ std::vector<Vec2d> curveCrossings(const BezierCurve& a, const BezierCurve& b, do
 bool curvesIntersectBusiness(const BezierCurve& a, const BezierCurve& b, double ep) {
     if (!bboxOverlap(a, b))
         return false;
-    auto pa = a.sample(40);
-    auto pb = b.sample(40);
+    // 性能优化: 采样从40降至24
+    auto pa = a.sample(24);
+    auto pb = b.sample(24);
     for (int i = 0; i + 1 < (int)pa.size(); ++i) {
         for (int j = 0; j + 1 < (int)pb.size(); ++j) {
             Vec2d isect;
@@ -266,7 +267,8 @@ bool curvesIntersectBusiness(const BezierCurve& a, const BezierCurve& b, double 
 }
 
 bool curveSelfIntersectsBusiness(const BezierCurve& c, double ep) {
-    auto pts = c.sample(80);
+    // 性能优化: 采样从80降至40 (O(N²) → 减少4倍)
+    auto pts = c.sample(40);
     if (pts.size() < 4)
         return false;
     for (int i = 0; i + 1 < (int)pts.size(); ++i) {

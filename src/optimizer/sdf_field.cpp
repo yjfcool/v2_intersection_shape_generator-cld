@@ -58,13 +58,13 @@ bool SDFField::insideAny(const Vec2d& pt, const std::vector<Polygon2d>& polys) c
 void SDFField::build(const BoundingBox2d& roi, const std::vector<Obstacle>& obs, double cs, double buf) {
     CacheKey key{roi, obs, cs, buf};
 
-    // Try to retrieve from cache
+    // 尝试从缓存获取
     auto it = cache_map_.find(key);
     if (it != cache_map_.end()) {
         grid_ = it->second;
         cs_ = cs;
         roi_ = roi;
-        // Recreate buffered polygons
+        // 重建缓冲多边形
         std::vector<Polygon2d> buffered;
         for (auto& o : obs) {
             if (o.geometry.outer.empty()) continue;
@@ -87,7 +87,7 @@ void SDFField::build(const BoundingBox2d& roi, const std::vector<Obstacle>& obs,
         } else {
             buffered_ = buffered;
         }
-        // Calculate rows and cols based on ROI and cell size
+        // 根据ROI和网格尺寸计算行数列数
         double mg = cs_;
         BoundingBox2d ext;
         ext.min_pt = roi_.min_pt - Vec2d(mg, mg);
@@ -98,10 +98,10 @@ void SDFField::build(const BoundingBox2d& roi, const std::vector<Obstacle>& obs,
         return;
     }
 
-    // Not in cache, build normally and store in cache
+    // 缓存未命中,正常构建并存入缓存
     buildInternal(roi, obs, cs, buf);
 
-    // Store in cache
+    // 存入缓存
     cache_map_[key] = grid_;
 }
 
@@ -203,29 +203,29 @@ Vec2d SDFField::obstaclePenaltyGrad(const Vec2d& pt, double cl) const {
     return s >= 0 ? Vec2d(0, 0) : 2.0 * s * gd;
 }
 
-// ─── Static cache implementation ──────────────────────────────────────────────────────
+// ─── 静态缓存实现 ──────────────────────────────────────────────────────
 
-// Define static members
+// 定义静态成员
 std::unordered_map<SDFField::CacheKey, std::vector<double>, SDFField::CacheKeyHash> SDFField::cache_map_;
 
 bool SDFField::CacheKey::operator==(const CacheKey& other) const {
-    // Compare ROI
+    // 比较ROI
     if (roi.min_pt.x() != other.roi.min_pt.x() || roi.min_pt.y() != other.roi.min_pt.y() ||
         roi.max_pt.x() != other.roi.max_pt.x() || roi.max_pt.y() != other.roi.max_pt.y()) {
         return false;
     }
 
-    // Compare cell size and buffer
+    // 比较网格尺寸与缓冲
     if (cell_size != other.cell_size || buffer != other.buffer) {
         return false;
     }
 
-    // Compare obstacles - simplified check based on size and positions for efficiency
+    // 比较障碍物 - 基于尺寸和位置的简化检查以提高效率
     if (obstacles.size() != other.obstacles.size()) {
         return false;
     }
 
-    // For each obstacle, check basic properties
+    // 对每个障碍物检查基本属性
     for (size_t i = 0; i < obstacles.size(); ++i) {
         const auto& obs1 = obstacles[i];
         const auto& obs2 = other.obstacles[i];
@@ -234,7 +234,7 @@ bool SDFField::CacheKey::operator==(const CacheKey& other) const {
             return false;
         }
 
-        // Check a few key points to determine similarity
+        // 检查几个关键点判断相似性
         if (!obs1.geometry.outer.empty() && !obs2.geometry.outer.empty()) {
             if (std::abs(obs1.geometry.outer[0].x() - obs2.geometry.outer[0].x()) > 1e-6 ||
                 std::abs(obs1.geometry.outer[0].y() - obs2.geometry.outer[0].y()) > 1e-6) {
@@ -255,14 +255,14 @@ std::size_t SDFField::CacheKeyHash::operator()(const SDFField::CacheKey& k) cons
     std::size_t h6 = std::hash<double>{}(k.buffer);
     std::size_t h7 = std::hash<size_t>{}(k.obstacles.size());
 
-    // Hash some key points from obstacles if they exist
+    // 若存在障碍物,对其关键点做哈希
     std::size_t h8 = 0;
     if (!k.obstacles.empty() && !k.obstacles[0].geometry.outer.empty()) {
         h8 = std::hash<double>{}(k.obstacles[0].geometry.outer[0].x() +
                                  k.obstacles[0].geometry.outer[0].y());
     }
 
-    // Combine hashes
+    // 组合哈希值
     return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3) ^ (h5 << 4) ^ (h6 << 5) ^ (h7 << 6) ^ (h8 << 7);
 }
 
@@ -302,6 +302,6 @@ void SDFField::buildInternal(const BoundingBox2d& roi, const std::vector<Obstacl
     rebuildGrid(buffered_);
 }
 
-// ─── End of file additions ────────────────────────────────────────────────────────────
+// ─── 文件末尾补充 ────────────────────────────────────────────────────────────
 
 }

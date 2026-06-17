@@ -50,6 +50,7 @@
 //#define use_deprecated  
 
 #include <vector>
+#include <array>
 #include <list>
 #include <set>
 #include <stdexcept>

@@ -30,3 +30,20 @@ add_ig_test(test_intersection_input_regression)
 add_ig_test(test_infeasibility)
 add_ig_test(test_integration)
 add_ig_test(test_scenarios)
+
+# Standalone diagnostic executable (not a test, just runs and prints)
+add_executable(diag_uturn diag_uturn.cpp)
+target_link_libraries(diag_uturn PRIVATE intersection_gen_lib)
+target_include_directories(diag_uturn PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(diag_uturn_geom diag_uturn_geom.cpp)
+target_link_libraries(diag_uturn_geom PRIVATE intersection_gen_lib)
+target_include_directories(diag_uturn_geom PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(diag_cluster_pairs diag_cluster_pairs.cpp)
+target_link_libraries(diag_cluster_pairs PRIVATE intersection_gen_lib)
+target_include_directories(diag_cluster_pairs PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(diag_pair_isect diag_pair_isect.cpp)
+target_link_libraries(diag_pair_isect PRIVATE intersection_gen_lib)
+target_include_directories(diag_pair_isect PRIVATE ${CMAKE_SOURCE_DIR}/src)

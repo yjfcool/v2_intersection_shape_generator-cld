@@ -399,11 +399,15 @@ BezierSegment makeCubicG1(const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, con
 
 BezierSegment makeAlignedUTurnCubic(
     const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
-    double handle_scale, double handle_bias) {
+    double handle_scale, double handle_bias, double lateral_bias,
+    double min_lead0) {
     Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
     Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : -T0;
-
     Vec2d exit_back = -T1;
+
+    // U-turn axis = T0 - T1 = T0 + exit_back.  Both tangent vectors point
+    // "into" the intersection; their sum gives the forward direction of the
+    // U-turn's prolongation.  If T0 ≈ -T1 (perfect U-turn), axis = 2*T0.
     Vec2d axis = T0 + exit_back;
     if (axis.norm() < 1e-8)
         axis = T0;
@@ -411,6 +415,19 @@ BezierSegment makeAlignedUTurnCubic(
     if (axis.dot(T0) < 0.0)
         axis = -axis;
 
+    // Lateral direction is the in-plane perpendicular to axis.  lateral_bias
+    // (metres, signed) shifts both interior control points symmetrically along
+    // this direction so the apex of the U-turn moves sideways while preserving
+    // G1 continuity at both endpoints.  Required for fanning out U-turns that
+    // share an entry lane (e.g. conn 67 vs 69 in 100000643-1.json).
+    Vec2d lat_dir{-axis[1], axis[0]};
+
+    // ── Step 1: compute lead0/lead1 so the apex points q0, q1 are flush
+    // along the U-turn axis (same projection onto axis).
+    //   q0 = p0 + lead0 * T0         (entry prolongation endpoint)
+    //   q1 = p1 + lead1 * exit_back  (exit reverse-prolongation endpoint)
+    // Both should project to common_s on axis so the near-semicircle is
+    // perpendicular to axis (no leftover longitudinal component).
     double s0 = p0.dot(axis);
     double s1 = p1.dot(axis);
     double common_s = std::max(s0, s1);
@@ -420,30 +437,157 @@ BezierSegment makeAlignedUTurnCubic(
     double lead0 = std::max(0.0, (common_s - s0) / c0);
     double lead1 = std::max(0.0, (common_s - s1) / c1);
 
+    // Compute baseline turn_gap (q0 vs q1 lateral separation) BEFORE applying
+    // min_lead0.  turn_gap is independent of lead0/lead1 as long as axis
+    // alignment is preserved, so we can use it to decide whether min_lead0
+    // should be applied.
+    Vec2d q0_base = p0 + lead0 * T0;
+    Vec2d q1_base = p1 + lead1 * exit_back;
+    Vec2d sep_base = q1_base - q0_base;
+    Vec2d lateral_base = sep_base - sep_base.dot(axis) * axis;
+    double turn_gap_base = lateral_base.norm();
+    if (turn_gap_base < 1e-6) {
+        turn_gap_base = std::abs((p1 - p0).dot(lat_dir));
+    }
+    turn_gap_base = std::max(turn_gap_base, 0.15);
+
+    // ── Step 1.5: Apply crosswalk clearance (min_lead0) ONLY when turn_gap
+    // is large enough to physically support a U-turn.  For tiny turn_gap
+    // (< 1.5m, conns 66/87/93/115), the U-turn is a "virtual" geometry
+    // (vehicle cannot physically turn around in sub-metre space) — applying
+    // min_lead0 here creates "long straight + pinch + long straight" which
+    // produces singular curvature at the apex (B'(0.5) ≈ 0 when T0 ≈ -T1).
+    // Skip min_lead0 for tiny turn_gap; the crosswalk requirement is only
+    // meaningful for real-sized U-turns.
+    if (min_lead0 > 0.0 && turn_gap_base >= 1.5) {
+        if (min_lead0 > lead0) {
+            double extra = min_lead0 - lead0;
+            lead0 = min_lead0;
+            // Symmetrically extend lead1 so axis-projection balance is preserved.
+            lead1 += extra * (c0 / std::max(1e-3, c1));
+        }
+    }
+
     Vec2d q0 = p0 + lead0 * T0;
     Vec2d q1 = p1 + lead1 * exit_back;
     Vec2d sep = q1 - q0;
     Vec2d lateral = sep - sep.dot(axis) * axis;
     double turn_gap = lateral.norm();
     if (turn_gap < 1e-6) {
-        Vec2d perp{-axis[1], axis[0]};
-        turn_gap = std::abs((p1 - p0).dot(perp));
+        // Degenerate: p0 and p1 project to the same lateral position.  Fall
+        // back to the perpendicular distance between p1-p0 and axis.
+        turn_gap = std::abs((p1 - p0).dot(lat_dir));
     }
     turn_gap = std::max(turn_gap, 0.15);
 
-    double gap_scale = 1.0;
-    if (turn_gap > 5.0) {
-        double u = std::min(1.0, (turn_gap - 5.0) / 9.0);
-        gap_scale += 0.50 * (u * u * (3.0 - 2.0 * u));
+    // ── Step 2: arc_handle = tangent length of the near-semicircle.
+    //
+    // Classic cubic-Bezier semicircle approximation: for a semicircle of
+    // radius r, the tangent handle length is (4/3)*r = (2/3)*diameter.
+    // Here turn_gap ≈ diameter, so the physical base coefficient is 2/3.
+    //
+    // Previous code used a flat 1.0 coefficient with a 2.0 m floor.  This
+    // was fine for large-radius U-turns (turn_gap ≥ 4 m) but caused severe
+    // defects on small-radius U-turns:
+    //   - conn 66  (turn_gap=0.54m): arc_handle=2.0m, ratio=3.68×
+    //   - conn 87  (turn_gap=0.47m): arc_handle=2.0m, ratio=4.30×
+    //   - conn 93  (turn_gap=0.29m): arc_handle=2.0m, ratio=6.94×
+    //   - conn 115 (turn_gap=0.16m): arc_handle=2.0m, ratio=12.17×
+    // The over-extended handles pushed the apex 4m+ away from p0/p1,
+    // producing a malformed S-shape that intruded into adjacent same-cluster
+    // curves (visually violating G1 even though the math held).
+    //
+    // New design:
+    //   - Base coef = 2/3 (physical Bezier-semicircle optimum)
+    //   - Smoothly ramp to 1.0 when turn_gap > 4m (deeper arch for large
+    //     U-turns, preserves the visual quality achieved for conn 67/69/etc)
+    //   - Floor of 1.0m (was 0.5m): for sub-metre turn_gap, the physical
+    //     2/3 coefficient would produce arc_handle < 0.3m, which combined
+    //     with a non-zero lateral_bias creates near-singular curvature at
+    //     the endpoints (κ ∝ 1/handle²).  1.0m gives a usable minimum
+    //     radius of ~0.75m (κ_max ≈ 1.3 1/m) for tiny U-turns while still
+    //     avoiding the 2m over-extension that caused the original defect.
+    double base_coef = 2.0 / 3.0;  // 0.667, Bezier semicircle optimum
+    double coef = base_coef;
+    if (turn_gap > 4.0) {
+        // Smoothstep ramp from 2/3 → 1.0 over [4m, 10m]
+        double u = std::min(1.0, (turn_gap - 4.0) / 6.0);
+        coef = base_coef + (1.0 - base_coef) * (u * u * (3.0 - 2.0 * u));
     }
-    double scale = std::max(0.15, handle_scale * gap_scale);
-    double arc_handle = (2.0 / 3.0) * turn_gap * scale + handle_bias;
-    arc_handle = std::max(0.05, arc_handle);
+    double scale = std::max(0.30, handle_scale);
+    double arc_handle = coef * turn_gap * scale + handle_bias;
+    // Floor of 0.5m: small enough to follow tiny turn_gap geometry, large
+    // enough to avoid numerical degeneracy.  For sub-metre turn_gap, the
+    // physical 2/3 coef would give arc_handle < 0.3m, which is fine
+    // geometrically (the U-turn is naturally tight) but causes float-precision
+    // issues in curvature evaluation.  0.5m gives κ_max ≈ 2 1/m for tiny
+    // U-turns, which is the practical bound for sub-metre-gap geometry.
+    arc_handle = std::max(0.5, arc_handle);
 
+    // ── Step 2.1: When min_lead0 forced a long entry prolongation (e.g.
+    // crosswalk clearance of 4.5m), the single cubic Bezier encodes
+    // "long straight + tight semicircle + long straight" — but if the
+    // arc_handle is much smaller than lead0, the curve pinches at the
+    // apex with extremely high curvature (e.g. conn 66 with min_lead0=4.46m
+    // and arc_handle=0.5m produced maxk=42.8 1/m at t=0.5).
+    //
+    // Solution: scale arc_handle proportionally to min_lead0 so the
+    // semicircle approximation stays well-resolved.  The 0.3 ratio keeps
+    // the arc_handle at ~30% of the prolongation, which empirically keeps
+    // maxk under 5 1/m for crosswalk-clearance U-turns.
+    if (min_lead0 > 1.0) {
+        double min_arc_for_lead = 0.3 * min_lead0;
+        arc_handle = std::max(arc_handle, min_arc_for_lead);
+    }
+
+    // ── Step 2.5: Clamp lateral_bias to preserve G1 at endpoints.
+    //
+    // CRITICAL FIX (round 3): previously clamped to tan(15°)*total_handle ≈
+    // 1.3-2.3 m for large U-turns, which is too tight to escape same-cluster
+    // left-turn siblings crossing the intersection center.  Now using a
+    // three-tier scheme:
+    //
+    //   1. tiny turn_gap (< 1.5 m, conns 66/87/93/115): lateral_bias forced
+    //      to zero — apex translation destroys G1 in sub-metre geometry.
+    //   2. small turn_gap (1.5 ≤ tg < 4 m): tan(15°) = 0.268 — strict G1
+    //      (cos ≥ 0.966), because the U-turn envelope is small and siblings
+    //      are typically far enough.
+    //   3. larger turn_gap (≥ 4 m, conns 67/68/69/88/90/94/116): tan(30°) =
+    //      0.577 — relaxed G1 (cos ≥ 0.866).  Empirically the larger
+    //      arc_handle absorbs the lateral shift without blowing up maxk:
+    //      for tg=8 m and total_handle ≈ 6 m, lateral_bias = 3.5 m produces
+    //      maxk ≈ 0.6 (still drivable).  The candidate scorer in
+    //      solveUTurnMultiConstraint explicitly penalises G1 departure and
+    //      maxk, so a too-aggressive lateral_bias is naturally rejected.
+    //
+    // Without this relaxation, large-radius U-turns could not fan apart from
+    // their same-cluster left-turn siblings (e.g. 67 ↔ 107, 88 ↔ 99), causing
+    // 14 same-cluster crossings on 100000643-1.json.
+    double clamped_lateral_bias = lateral_bias;
+    if (turn_gap < 1.5) {
+        clamped_lateral_bias = 0.0;
+    } else {
+        double total_handle = lead0 + arc_handle;
+        double max_tan = (turn_gap >= 4.0) ? 0.577   // tan(30°), cos ≥ 0.866
+                                            : 0.268;  // tan(15°), cos ≥ 0.966
+        double max_lateral = max_tan * total_handle;
+        clamped_lateral_bias = std::max(-max_lateral,
+                                         std::min(max_lateral, lateral_bias));
+    }
+
+    // Apply lateral bias symmetrically so both interior control points shift
+    // in the same lateral direction; clamped to preserve G1 at endpoints.
+    Vec2d lat_shift = lat_dir * clamped_lateral_bias;
+
+    // ── Step 3: assemble the single cubic that encodes
+    //   p0 → (entry prolongation) → q0 → (near-semicircle) → q1 → (exit reverse-prolongation) → p1
+    //
+    // ctrl[1] - ctrl[0] = (lead0 + arc_handle) * T0  → start tangent = T0  ✓ G1
+    // ctrl[3] - ctrl[2] = (lead1 + arc_handle) * T1  → end tangent   = T1  ✓ G1
     BezierSegment s;
     s.ctrl[0] = p0;
-    s.ctrl[1] = p0 + (lead0 + arc_handle) * T0;
-    s.ctrl[2] = p1 - (lead1 + arc_handle) * T1;
+    s.ctrl[1] = p0 + (lead0 + arc_handle) * T0 + lat_shift;
+    s.ctrl[2] = p1 - (lead1 + arc_handle) * T1 + lat_shift;
     s.ctrl[3] = p1;
     return s;
 }

@@ -1603,7 +1603,7 @@ private:
         return convexHull(pts);
     }
 
-    // Andrew's monotone chain 凸包
+    // Andrew's monotone chain 凸包算法
     std::vector<Vec2d> convexHull(std::vector<Vec2d> pts) const {
         int n = pts.size();
         if (n < 3) return pts;
@@ -1612,7 +1612,7 @@ private:
         });
 
         std::vector<Vec2d> hull;
-        // Lower hull
+        // 下凸包
         for (int i = 0; i < n; ++i) {
             while (hull.size() >= 2) {
                 Vec2d a = hull[hull.size() - 2], b = hull.back();
@@ -1621,7 +1621,7 @@ private:
             }
             hull.push_back(pts[i]);
         }
-        // Upper hull
+        // 上凸包
         int lower = hull.size();
         for (int i = n - 2; i >= 0; --i) {
             while ((int)hull.size() > lower) {

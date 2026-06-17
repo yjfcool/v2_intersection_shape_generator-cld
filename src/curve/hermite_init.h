@@ -4,15 +4,18 @@
 namespace isg {
 
 struct SDFField;
+
+/// SDF最大间隙路径：在SDF场中寻找障碍物间隙最大的路径
 std::vector<Vec2d> sdfMaxClearancePath(
     const SDFField&, const Polygon2d&, const Vec2d&, const Vec2d&, double alpha = 2.0);
 
-// sibling_polys: pre-sampled polylines of already-generated curves in this cluster
-// Used by Level-1 to avoid choosing the same bypass side as opposing arches.
+/// 初始曲线构造（方案A：几何直接构造）
+/// sibling_polys: 已生成同簇曲线的采样点列，Level-1用于避免选择与对向拱交叉的绕行侧
 BezierCurve buildInitialCurve(
     const Vec2d&, const Vec2d&, const Vec2d&, const Vec2d&,
     const SDFField&, const Polygon2d&, const std::vector<std::vector<Vec2d>>& sibling_polys = {});
 
+/// 两段式U型调头构造
 BezierCurve buildTwoSegmentUTurn(
     const Vec2d&, const Vec2d&, const Vec2d&, const Vec2d&, const SDFField&, const Polygon2d&);
 

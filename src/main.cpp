@@ -1,5 +1,7 @@
 // ============================================================
-// main
+// 路口形态生成器主程序
+// 用法: ./intersection_gen [输入json文件路径]
+//   不带参数时按默认顺序处理 datas/ 目录下全部数据集
 // ============================================================
 #include "io/iodata_json.h"
 #include "io/iodata_shapefile.h"
@@ -38,6 +40,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Processing input with " << inp.connectivities.size() << " connectivities and "
                       << inp.lanes.size() << " lanes" << std::endl;
 
+            // 保存原始输入到 ./<fname>/input/
             save(inp, "./" + fname + "/input/", "");
 
             isg::IntersectionShapeGenerator gen;
@@ -65,6 +68,7 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "Successfully generated " << out.connectivity_curves.size() << " connectivity curves" << std::endl;
 
+            // 保存生成结果到 ./<fname>/output/
             save(out, "./" + fname + "/output/", "");
         }
     }
