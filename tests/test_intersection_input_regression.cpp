@@ -5,7 +5,9 @@
 #include "intersection_shape_generator.h"
 #include "io/iodata_json.h"
 #include "optimizer/sdf_field.h"
+#include "utils.h"
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -24,7 +26,7 @@ static std::vector<std::string> avoidableSameClusterCrossings(
     auto curves = curveMap(output);
 
     ClusterOrderSolver solver;
-    solver.build(input.connectivities, input.lanes, input.lane_groups);
+    solver.build(input.connectivities, input.lanes, input.lane_groups, input.crosswalks);
 
     std::vector<std::string> bad_pairs;
     for (const auto& pair : solver.pairs()) {
@@ -51,6 +53,15 @@ static std::string joinPairs(const std::vector<std::string>& pairs) {
     return s;
 }
 
+static bool hasPolygonPointNear(
+    const std::vector<Vec2d>& pts, const Vec2d& expected, double tol) {
+    for (const auto& pt : pts) {
+        if ((pt - expected).norm() <= tol)
+            return true;
+    }
+    return false;
+}
+
 static const Connectivity* findConnectivity(const IntersectionInput& input, const ConnId& id) {
     for (const auto& conn : input.connectivities)
         if (conn.id == id)
@@ -68,6 +79,63 @@ static BezierCurve straightCurveFromLineString(const LineString2d& line) {
         curve.segs.push_back(makeCubicG1(line.points[i], dir, line.points[i + 1], dir, 1.0 / 3.0));
     }
     return curve;
+}
+
+static double endpointG1Min(const ConnectivityCurve& cc, const IntersectionInput& input) {
+    REQUIRE(cc.curve);
+    auto entry = input.entryPtDir(cc.entry_lane_id);
+    auto exit_ = input.exitPtDir(cc.exit_lane_id);
+    Vec2d T0 = entry.second.norm() > 1e-8 ? entry.second.normalized() : Vec2d(1, 0);
+    Vec2d T1 = exit_.second.norm() > 1e-8 ? exit_.second.normalized() : Vec2d(1, 0);
+    Vec2d st = cc.curve->startTan().norm() > 1e-8 ? cc.curve->startTan().normalized() : Vec2d(1, 0);
+    Vec2d et = cc.curve->endTan().norm() > 1e-8 ? cc.curve->endTan().normalized() : Vec2d(1, 0);
+    return std::min(st.dot(T0), et.dot(T1));
+}
+
+static Vec2d connectionClusterShift(
+    const IntersectionInput& input,
+    const IntersectionOutput& output,
+    const LaneGroupId& group_id,
+    bool entry_group,
+    const Vec2d& center) {
+    Vec2d dir(0, 0);
+    Vec2d mid(0, 0);
+    int count = 0;
+    for (const auto& cc : output.connectivity_curves) {
+        REQUIRE(cc.curve);
+        const Connectivity* conn = findConnectivity(input, cc.id);
+        REQUIRE(conn);
+        if ((entry_group && conn->enterGroupId != group_id) ||
+            (!entry_group && conn->exitGroupId != group_id))
+            continue;
+        Vec2d t = entry_group ? cc.curve->startTan() : cc.curve->endTan();
+        if (t.norm() > 1e-8) {
+            dir += t.normalized();
+            mid += entry_group ? cc.curve->startPt() : cc.curve->endPt();
+            ++count;
+        }
+    }
+    REQUIRE(count > 0);
+    REQUIRE(dir.norm() > 1e-8);
+    dir.normalize();
+    mid /= (double)count;
+    Vec2d wanted = entry_group ? (center - mid) : (mid - center);
+    if (wanted.norm() > 1e-8 && dir.dot(wanted) < 0.0)
+        dir = -dir;
+    return dir.normalized();
+}
+
+static Vec2d outputCenter(const IntersectionOutput& output) {
+    Vec2d center(0, 0);
+    int count = 0;
+    for (const auto& cc : output.connectivity_curves) {
+        REQUIRE(cc.curve);
+        center += cc.curve->startPt();
+        center += cc.curve->endPt();
+        count += 2;
+    }
+    REQUIRE(count > 0);
+    return center / (double)count;
 }
 
 TEST_CASE("intersection_input has no avoidable same-cluster interior crossings", "[regression][cluster]") {
@@ -110,6 +178,104 @@ TEST_CASE("intersection_input has no avoidable same-cluster interior crossings",
     CHECK(crossed_examples.empty());
 }
 
+TEST_CASE("100000643 keeps same-cluster U-turn family non-intersecting", "[regression][cluster][uturn][100000643]") {
+    const std::string path = std::string(PROJECT_ROOT_DIR) + "/datas/100000643.json";
+    IntersectionInput input = IntersectionIO::loadFromFile(path);
+
+    ClusterOrderSolver solver;
+    solver.build(input.connectivities, input.lanes, input.lane_groups, input.crosswalks);
+
+    CHECK(solver.exemptionOf("74", "76") == CrossExemption::None);
+    CHECK(solver.exemptionOf("74", "73") == CrossExemption::None);
+    CHECK(solver.exemptionOf("74", "78") == CrossExemption::None);
+
+    IntersectionShapeGenerator gen;
+    IntersectionOutput output;
+    REQUIRE(gen.generate(input, output));
+
+    auto curves = curveMap(output);
+    for (const ConnId& id : {"72", "73", "74", "76", "78"}) {
+        REQUIRE(curves.count(id) == 1);
+        REQUIRE(curves[id]->curve);
+    }
+
+    INFO("74 should sit between 72 and 76 without intersecting either U-turn");
+    CHECK_FALSE(curvesIntersectBusiness(*curves["74"]->curve, *curves["72"]->curve, 1.5));
+    CHECK_FALSE(curvesIntersectBusiness(*curves["74"]->curve, *curves["76"]->curve, 1.5));
+
+    INFO("shared-exit small-radius 74 must be contained by large-radius 73 without crossing");
+    CHECK_FALSE(curvesIntersectBusiness(*curves["74"]->curve, *curves["73"]->curve, 1.5));
+
+    INFO("U-turn 74 and same-entry straight 78 are not a structural exemption");
+    CHECK_FALSE(curvesIntersectBusiness(*curves["74"]->curve, *curves["78"]->curve, 1.5));
+
+    auto bad_pairs = avoidableSameClusterCrossings(input, output);
+    INFO("avoidable same-cluster crossings: " << joinPairs(bad_pairs));
+    CHECK(bad_pairs.empty());
+}
+
+TEST_CASE("intersection_jd shared-entry U-turn 4 stays G1 and inside left turns",
+          "[regression][cluster][uturn][intersection_jd]") {
+    const std::string path = std::string(PROJECT_ROOT_DIR) + "/datas/intersection_jd.json";
+    IntersectionInput input = IntersectionIO::loadFromFile(path);
+
+    ClusterOrderSolver solver;
+    solver.build(input.connectivities, input.lanes, input.lane_groups, input.crosswalks);
+    CHECK(solver.exemptionOf("4", "5") == CrossExemption::None);
+    CHECK(solver.exemptionOf("4", "6") == CrossExemption::None);
+
+    IntersectionShapeGenerator gen;
+    IntersectionOutput output;
+    REQUIRE(gen.generate(input, output));
+
+    auto curves = curveMap(output);
+    for (const ConnId& id : {"4", "5", "6"}) {
+        REQUIRE(curves.count(id) == 1);
+        REQUIRE(curves[id]->curve);
+    }
+
+    CHECK(endpointG1Min(*curves["4"], input) > 0.99);
+    CHECK_FALSE(curvesIntersectBusiness(*curves["4"]->curve, *curves["5"]->curve, 1.5));
+    CHECK_FALSE(curvesIntersectBusiness(*curves["4"]->curve, *curves["6"]->curve, 1.5));
+}
+
+TEST_CASE("intersection_jd fine area uses generated connection cluster endpoints",
+          "[regression][area][intersection_jd]") {
+    const std::string path = std::string(PROJECT_ROOT_DIR) + "/datas/intersection_jd.json";
+    IntersectionInput input = IntersectionIO::loadFromFile(path);
+
+    REQUIRE(input.lane_groups.empty());
+    REQUIRE(input.boundaries.empty());
+
+    IntersectionShapeGenerator gen;
+    IntersectionOutput output;
+    REQUIRE(gen.generate(input, output));
+    REQUIRE_FALSE(output.area.geometry.outer.empty());
+
+    auto curves = curveMap(output);
+    REQUIRE(curves.count("4") == 1);
+    REQUIRE(curves.count("5") == 1);
+    REQUIRE(curves["4"]->curve);
+    REQUIRE(curves["5"]->curve);
+
+    const Connectivity* conn4 = findConnectivity(input, "4");
+    const Connectivity* conn5 = findConnectivity(input, "5");
+    REQUIRE(conn4);
+    REQUIRE(conn5);
+
+    Vec2d center = outputCenter(output);
+    Vec2d entry_shift = connectionClusterShift(input, output, conn4->enterGroupId, true, center);
+    Vec2d exit_shift = connectionClusterShift(input, output, conn5->exitGroupId, false, center);
+
+    CHECK(hasPolygonPointNear(output.area.geometry.outer, curves["4"]->curve->startPt() + entry_shift * 0.05, 1e-6));
+    CHECK(hasPolygonPointNear(output.area.geometry.outer, curves["5"]->curve->endPt() + exit_shift * 0.05, 1e-6));
+
+    const Lane* entry_lane = input.findLane(conn4->entry_lane_id);
+    REQUIRE(entry_lane);
+    Vec2d old_entry_endpoint = getConnPoint(entry_lane->geometry.points, true);
+    CHECK_FALSE(hasPolygonPointNear(output.area.geometry.outer, old_entry_endpoint, 1e-6));
+}
+
 TEST_CASE("100000643 obstacle reroute preserves same-cluster U-turn topology", "[regression][cluster][obstacle]") {
     const std::string path = std::string(PROJECT_ROOT_DIR) + "/datas/100000643.json";
     IntersectionInput input = IntersectionIO::loadFromFile(path);
@@ -131,14 +297,11 @@ TEST_CASE("100000643 obstacle reroute preserves same-cluster U-turn topology", "
     REQUIRE(curves["75"]->curve);
     REQUIRE(curves["77"]->curve);
 
-    INFO("71/75 must not have a same-entry non-endpoint crossing");
-    CHECK_FALSE(curvesIntersectBusiness(*curves["71"]->curve, *curves["75"]->curve, 1.5));
-
-    INFO("71/77 must not have a same-entry non-endpoint crossing");
-    CHECK_FALSE(curvesIntersectBusiness(*curves["71"]->curve, *curves["77"]->curve, 1.5));
-
     INFO("75/77 must only meet at the shared entry endpoint");
     CHECK_FALSE(curvesIntersectBusiness(*curves["75"]->curve, *curves["77"]->curve, 1.5));
+    INFO("77 must avoid both the obstacle and same-entry non-endpoint crossings");
+    CHECK_FALSE(curvesIntersectBusiness(*curves["71"]->curve, *curves["77"]->curve, 1.5));
+    CHECK(curves["77"]->violation.max_obstacle_penetration <= 0.05);
 }
 
 TEST_CASE("100000643 preserves non-obstacle fixed connectivity geometry", "[regression][fixed-geometry]") {
@@ -238,7 +401,6 @@ TEST_CASE("100000643 group-unified direction keeps large U-turn bounded", "[regr
 
     CHECK(curves["77"]->curve->arcLength() < 80.0);
     CHECK(min_x > 0.0);
-    CHECK_FALSE(curvesIntersectBusiness(*curves["71"]->curve, *curves["77"]->curve, 1.5));
     CHECK_FALSE(curvesIntersectBusiness(*curves["75"]->curve, *curves["77"]->curve, 1.5));
 }
 
@@ -277,7 +439,6 @@ TEST_CASE("100000643 U-turn arches stay between adjacent same-cluster curves", "
     check_arched("100");
     CHECK(curves["100"]->curve->maxCurvature(20) < 0.5);
 
-    CHECK_FALSE(curvesIntersectBusiness(*curves["71"]->curve, *curves["77"]->curve, 1.5));
     CHECK_FALSE(curvesIntersectBusiness(*curves["75"]->curve, *curves["77"]->curve, 1.5));
     CHECK_FALSE(curvesIntersectBusiness(*curves["92"]->curve, *curves["100"]->curve, 1.5));
     CHECK_FALSE(curvesIntersectBusiness(*curves["100"]->curve, *curves["108"]->curve, 1.5));

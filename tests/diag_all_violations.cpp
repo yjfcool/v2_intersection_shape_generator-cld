@@ -27,7 +27,7 @@ static int checkFile(const std::string& path) {
     for (const auto& cc : output.connectivity_curves) cmap[cc.id] = &cc;
 
     ClusterOrderSolver solver;
-    solver.build(input.connectivities, input.lanes, input.lane_groups);
+    solver.build(input.connectivities, input.lanes, input.lane_groups, input.crosswalks);
 
     int violations = 0;
     int total_constrained_pairs = 0;

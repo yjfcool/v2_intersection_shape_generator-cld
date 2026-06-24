@@ -36,11 +36,11 @@ target_compile_options(intersection_gen_lib PRIVATE
 )
 
 # 性能优化: 不在CMakeLists中硬编码-O2, 由CMAKE_BUILD_TYPE控制
-# - Debug: -g -Og -DNDEBUG (优化调试, 性能接近Release)
+# - Debug: -g -Og (保留Debug快速分支,不定义NDEBUG)
 # - Release: -O3 -DNDEBUG
 # - RelWithDebInfo: -O2 -g -DNDEBUG
 target_compile_options(intersection_gen_lib PRIVATE
-        $<$<CONFIG:Debug>:-g -Og -DNDEBUG>
+        $<$<CONFIG:Debug>:-g -Og>
         $<$<CONFIG:Release>:-O3 -DNDEBUG>
         $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>
 )

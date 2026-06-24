@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <string>
 
 namespace isg {
@@ -637,6 +638,15 @@ private:
         return std::find(ids.begin(), ids.end(), id) != ids.end();
     }
 
+    bool containsLaneId(const std::vector<LaneId>& ids, const LaneId& id) const {
+        return std::find(ids.begin(), ids.end(), id) != ids.end();
+    }
+
+    void addUniqueLaneId(std::vector<LaneId>& ids, const LaneId& id) const {
+        if (!id.empty() && !containsLaneId(ids, id))
+            ids.push_back(id);
+    }
+
     bool laneInAnyGroup(const std::vector<const LaneGroup*>& groups, const LaneId& lane_id) const {
         for (const auto* group : groups) {
             if (group && groupContainsLaneId(*group, lane_id))
@@ -986,6 +996,66 @@ private:
             ids.push_back(id);
     }
 
+    std::vector<LaneGroup> effectiveLaneGroups(
+        const IntersectionInput& inp, const std::vector<ConnectivityCurve>& centerlines) const {
+        std::vector<LaneGroup> groups = inp.lane_groups;
+        std::map<LaneGroupId, size_t> index;
+        for (size_t i = 0; i < groups.size(); ++i)
+            index[groups[i].id] = i;
+
+        auto ensure_group = [&](const LaneGroupId& id, GroupRole role) -> LaneGroup& {
+            auto it = index.find(id);
+            if (it != index.end())
+                return groups[it->second];
+            LaneGroup group;
+            group.id = id;
+            group.role = role;
+            groups.push_back(group);
+            index[id] = groups.size() - 1;
+            return groups.back();
+        };
+
+        auto add_lane_to_group = [&](const LaneGroupId& id, GroupRole role, const LaneId& lane_id) {
+            if (id.empty() || lane_id.empty())
+                return;
+            LaneGroup& group = ensure_group(id, role);
+            addUniqueLaneId(group.lanes, lane_id);
+            const Lane* lane = inp.findLane(lane_id);
+            if (!lane)
+                return;
+            addUniqueLaneEdgeId(group.boundaries, lane->left_edge_id);
+            addUniqueLaneEdgeId(group.boundaries, lane->right_edge_id);
+        };
+
+        for (const auto& conn : inp.connectivities) {
+            add_lane_to_group(conn.enterGroupId, GroupRole::Entry, conn.entry_lane_id);
+            add_lane_to_group(conn.exitGroupId, GroupRole::Exit, conn.exit_lane_id);
+        }
+
+        for (const auto& cc : centerlines) {
+            const Connectivity* conn = nullptr;
+            for (const auto& c : inp.connectivities) {
+                if (c.id == cc.id) {
+                    conn = &c;
+                    break;
+                }
+            }
+            if (conn) {
+                add_lane_to_group(conn->enterGroupId, GroupRole::Entry, cc.entry_lane_id);
+                add_lane_to_group(conn->exitGroupId, GroupRole::Exit, cc.exit_lane_id);
+                continue;
+            }
+            const Lane* entry_lane = inp.findLane(cc.entry_lane_id);
+            const Lane* exit_lane = inp.findLane(cc.exit_lane_id);
+            if (entry_lane)
+                add_lane_to_group(entry_lane->groupId, GroupRole::Entry, cc.entry_lane_id);
+            if (exit_lane)
+                add_lane_to_group(exit_lane->groupId, GroupRole::Exit, cc.exit_lane_id);
+        }
+
+        return groups;
+    }
+
     // 提取组内参与端侧边界的车道边线：优先组边界，再补充组内车道左右边线。
     std::vector<LaneEdgeId> laneGroupEdgeIds(
         const IntersectionInput& inp, const LaneGroup& group) const {
@@ -1011,12 +1081,69 @@ private:
         pts.push_back(p);
     }
 
-    // 计算组端侧折线的平移方向：汇总边线和中心线端侧切向，失败时用组端点到中心兜底。
-    // 返回方向已区分进入组回缩到路口内、退出组外扩到路口外。
+    // 计算组端侧折线的平移方向：汇总边线、中心线和生成线簇端侧切向，
+    // 失败时用组端点到中心兜底。返回方向已区分进入组回缩到路口内、退出组外扩到路口外。
     Vec2d laneGroupShiftDir(
-        const IntersectionInput& inp, const LaneGroup& group, const Vec2d& center) const {
+        const IntersectionInput& inp,
+        const LaneGroup& group,
+        const Vec2d& center,
+        const std::vector<ConnectivityCurve>* centerlines = nullptr) const {
         Vec2d dir(0, 0);
         int count = 0;
+        if (centerlines) {
+            for (const auto& cc : *centerlines) {
+                if (!cc.curve)
+                    continue;
+                if (group.role == GroupRole::Entry) {
+                    const Lane* lane = inp.findLane(cc.entry_lane_id);
+                    if (!lane || (lane->groupId != group.id && !groupContainsLaneId(group, cc.entry_lane_id)))
+                        continue;
+                    Vec2d t = cc.curve->startTan();
+                    if (t.norm() > 1e-8) {
+                        dir += t.normalized();
+                        ++count;
+                    }
+                } else {
+                    const Lane* lane = inp.findLane(cc.exit_lane_id);
+                    if (!lane || (lane->groupId != group.id && !groupContainsLaneId(group, cc.exit_lane_id)))
+                        continue;
+                    Vec2d t = cc.curve->endTan();
+                    if (t.norm() > 1e-8) {
+                        dir += t.normalized();
+                        ++count;
+                    }
+                }
+            }
+            if (count > 0 && dir.norm() > 1e-8) {
+                dir.normalize();
+                Vec2d mid(0, 0);
+                int mid_count = 0;
+                for (const auto& cc : *centerlines) {
+                    if (!cc.curve)
+                        continue;
+                    if (group.role == GroupRole::Entry) {
+                        const Lane* lane = inp.findLane(cc.entry_lane_id);
+                        if (!lane || (lane->groupId != group.id && !groupContainsLaneId(group, cc.entry_lane_id)))
+                            continue;
+                        mid += cc.curve->startPt();
+                    } else {
+                        const Lane* lane = inp.findLane(cc.exit_lane_id);
+                        if (!lane || (lane->groupId != group.id && !groupContainsLaneId(group, cc.exit_lane_id)))
+                            continue;
+                        mid += cc.curve->endPt();
+                    }
+                    ++mid_count;
+                }
+                if (mid_count > 0) {
+                    mid /= (double)mid_count;
+                    Vec2d wanted = (group.role == GroupRole::Entry) ? (center - mid) : (mid - center);
+                    if (wanted.norm() > 1e-8 && dir.dot(wanted) < 0.0)
+                        dir = -dir;
+                }
+                return dir.normalized();
+            }
+        }
+
         for (const auto& edge_id : laneGroupEdgeIds(inp, group)) {
             const LaneEdge* edge = inp.findEdge(edge_id);
             if (!edge || edge->geometry.points.size() < 2)
@@ -1050,6 +1177,53 @@ private:
                 return dir.normalized();
         }
         return Vec2d(1, 0);
+    }
+
+    // 由已生成的连通曲线端点构建端侧边界折线：
+    // 进入组取生成线簇首端向路口内回缩，退出组取生成线簇尾端向路口外扩。
+    std::vector<Vec2d> buildLaneGroupCurveCutLine(
+        const IntersectionInput& inp,
+        const LaneGroup& group,
+        const std::vector<ConnectivityCurve>& centerlines,
+        const Vec2d& center) const {
+        std::vector<GroupCutPoint> cut_pts;
+        Vec2d shift_dir = laneGroupShiftDir(inp, group, center, &centerlines);
+
+        for (const auto& cc : centerlines) {
+            if (!cc.curve)
+                continue;
+            const bool is_entry_group = group.role == GroupRole::Entry;
+            const Lane* lane = inp.findLane(is_entry_group ? cc.entry_lane_id : cc.exit_lane_id);
+            const LaneId& lane_id = is_entry_group ? cc.entry_lane_id : cc.exit_lane_id;
+            if (!lane || (lane->groupId != group.id && !groupContainsLaneId(group, lane_id)))
+                continue;
+
+            GroupCutPoint cp;
+            cp.pt = is_entry_group ? cc.curve->startPt() : cc.curve->endPt();
+            cp.order = lane->laneOrder * 2 + 1;
+            cp.has_order = true;
+            addGroupCutPoint(cut_pts, cp);
+        }
+
+        if (cut_pts.size() < 2)
+            return {};
+
+        Vec2d lateral_dir = rotLeft(shift_dir);
+        for (auto& p : cut_pts)
+            p.lateral = p.pt.dot(lateral_dir);
+
+        std::sort(cut_pts.begin(), cut_pts.end(), [](const GroupCutPoint& a, const GroupCutPoint& b) {
+            if (a.has_order != b.has_order)
+                return a.has_order > b.has_order;
+            if (a.has_order && a.order != b.order)
+                return a.order < b.order;
+            return a.lateral < b.lateral;
+        });
+
+        std::vector<Vec2d> out;
+        for (const auto& p : cut_pts)
+            pushUnique(out, p.pt + groupCutOffset * shift_dir, 0.03);
+        return out;
     }
 
     // 构建进入/退出组的端侧边界折线：收集车道边线端点和中心线端点，按线序/车道序连接。
@@ -1221,7 +1395,9 @@ private:
     // 组装精细路口面：道路边缘线与所有进入/退出组端侧边界折线共同排序成可凹多边形。
     // 端侧边界先按组回缩/外扩，再与道路边缘对齐，最后统一修复多边形绕向与闭合。
     std::vector<Vec2d> buildFromLaneGroupCuts(
-        const IntersectionInput& inp, const Vec2d& center) const {
+        const IntersectionInput& inp,
+        const std::vector<ConnectivityCurve>& centerlines,
+        const Vec2d& center) const {
         std::vector<AreaChain> chains;
         std::vector<std::vector<Vec2d>> boundary_lines;
         std::vector<std::vector<Vec2d>> cut_lines;
@@ -1232,8 +1408,11 @@ private:
             boundary_lines.push_back(bnd.geometry.points);
         }
 
-        for (const auto& group : inp.lane_groups) {
-            std::vector<Vec2d> cut = buildLaneGroupCutLine(inp, group, center);
+        std::vector<LaneGroup> groups = effectiveLaneGroups(inp, centerlines);
+        for (const auto& group : groups) {
+            std::vector<Vec2d> cut = buildLaneGroupCurveCutLine(inp, group, centerlines, center);
+            if (cut.size() < 2)
+                cut = buildLaneGroupCutLine(inp, group, center);
             if (cut.size() >= 2)
                 cut_lines.push_back(cut);
         }
@@ -1328,9 +1507,8 @@ private:
         const std::vector<ConnectivityCurve>& centerlines,
         const Vec2d& center,
         double radius) const {
-        (void)centerlines;
         (void)radius;
-        std::vector<Vec2d> by_group_cuts = buildFromLaneGroupCuts(inp, center);
+        std::vector<Vec2d> by_group_cuts = buildFromLaneGroupCuts(inp, centerlines, center);
         if (by_group_cuts.size() >= 4)
             return by_group_cuts;
 

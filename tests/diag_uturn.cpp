@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Generated %zu connectivity curves\n", output.connectivity_curves.size());
 
     ClusterOrderSolver solver;
-    solver.build(input.connectivities, input.lanes, input.lane_groups);
+    solver.build(input.connectivities, input.lanes, input.lane_groups, input.crosswalks);
 
     auto cmap = curveMap(output);
 

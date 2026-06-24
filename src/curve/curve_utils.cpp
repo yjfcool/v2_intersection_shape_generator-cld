@@ -251,9 +251,13 @@ std::vector<Vec2d> curveCrossings(const BezierCurve& a, const BezierCurve& b, do
 bool curvesIntersectBusiness(const BezierCurve& a, const BezierCurve& b, double ep) {
     if (!bboxOverlap(a, b))
         return false;
-    // 性能优化: 采样从40降至24
-    auto pa = a.sample(24);
-    auto pb = b.sample(24);
+    auto adaptiveSample = [](const BezierCurve& c) {
+        int n = std::max(48, (int)std::ceil(c.arcLength() / 0.20) + 1);
+        n = std::min(n, 240);
+        return c.sampleByArcLength(n);
+    };
+    auto pa = adaptiveSample(a);
+    auto pb = adaptiveSample(b);
     for (int i = 0; i + 1 < (int)pa.size(); ++i) {
         for (int j = 0; j + 1 < (int)pb.size(); ++j) {
             Vec2d isect;

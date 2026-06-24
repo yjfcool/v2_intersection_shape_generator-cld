@@ -243,9 +243,37 @@ void ClusterOrderSolver::addPairsFromSortedCluster(
 //                  与排序键独立，否则永远<0导致检测失效)
 //     倒置: rank_diff * lat_diff > 0  → StructuralCross
 void ClusterOrderSolver::detectTopologicalInversions(
-        const std::vector<Connectivity> &conns) {
+        const std::vector<Connectivity> &conns, const std::vector<Lane> &lanes,
+        const std::vector<Crosswalk> &crosswalks) {
     constexpr double LAT_EPS = 0.3;        // 米 — 忽略近相等横向距离
     constexpr double OPP_SIDE_THRESH = 3.0; // 米 — 对侧检测最小横向幅度
+    (void)crosswalks;
+
+    // 辅助函数: 从几何方位计算转向类型
+    //   t0 = 进入车道切向, t1 = 退出车道切向, path = (p1-p0).normalized()
+    //   cross2d(t0, path) > 0.5 → 左转
+    //   cross2d(t0, path) < -0.5 → 右转
+    //   |cross2d(t0, path)| < 0.5 且 t0·t1 > 0 → 直行
+    //   t0·t1 < -0.5 → U型调头
+    // 返回: 'U'=调头, 'L'=左转, 'R'=右转, 'S'=直行, '?'=未知
+    auto geometricTurnType = [&](const Connectivity* c) -> char {
+        const Lane* el = findLane(lanes, c->entry_lane_id);
+        const Lane* xl = findLane(lanes, c->exit_lane_id);
+        if (!el || !xl) return '?';
+        Vec2d t0 = entryTangent(el);
+        Vec2d t1 = exitTangent(xl);
+        Vec2d p0 = entryEndpoint(el);
+        Vec2d p1 = exitEndpoint(xl);
+        Vec2d path = p1 - p0;
+        if (path.norm() < 1e-6) return '?';
+        path.normalize();
+        double dot = t0.dot(t1);
+        if (dot < -0.5) return 'U';
+        double cross = cross2d(t0, path);
+        if (cross > 0.5) return 'L';
+        if (cross < -0.5) return 'R';
+        return 'S';
+    };
 
     for (auto &pair:pairs_) {
         if (pair.exempt != CrossExemption::None)continue;
@@ -266,42 +294,60 @@ void ClusterOrderSolver::detectTopologicalInversions(
             (!ca->exit_lane_id.empty() && ca->exit_lane_id == cb->exit_lane_id);
         bool share_lane_endpoint = share_entry_lane || share_exit_lane;
 
-        // ── 两个U型调头共享进入或退出车道：不属于结构性交叉 ──
-        //
-        // 重要(修复): 之前认为两个共享退出车道的U型调头"必须在路口内交叉"是错的:
-        //   - 同进入组内不同进入车道 → 同退出车道的两个U型调头
-        //     可按"左进=内层浅拱、右进=外层深拱"有序排列不相交
-        //   - 两条曲线在共享退出端点汇聚，但拱顶位置(纵深,横向)不同，不交错
-        //
-        // 此处保持配对为受约束(shared_endpoint=true, 在addPairsFromSortedCluster中已设置)，
-        // evalCluster在端点附近使用18%跳过区，仅约束中段发散区；
-        // U型调头多约束求解器主动搜索lead0/lateral_bias/handle_bias候选
-        // 保持两条拱弧的横向有序。
-        //
-        // 这也符合广义原则: 同簇非端点非交约束适用于线簇中所有转向类型对
-        // (U-U/U-turn/turn)，不仅限于非U型对。
+        char tA = geometricTurnType(ca);
+        char tB = geometricTurnType(cb);
+        bool a_is_uturn = a_uturn || tA == 'U';
+        bool b_is_uturn = b_uturn || tB == 'U';
 
-        // ── U型调头 vs 非U型调头(不共享车道端点) = 结构性交叉 ──
-        //
-        // 当U型调头(T0·T1 < -0.5)与非U型调头(T0·T1 > 0)在同一簇(同进入或同退出)
-        // 但不共享实际车道端点时，必然在路口内交叉:
-        //   - U型拱弧向前延伸至路口中心并回环
-        //   - 非U型曲线从不同进入arm(同退出情形)或通往不同退出arm(同进入情形)
-        //     也途经路口中心
-        //   - 中心区域路径不可避免地重叠
-        //
-        // 例外: 当共享车道端点时,曲线从共享点发散,内部不交叉,
-        // 由共享端点跳过区处理端点邻近,保持约束配对维持横向序
-        if (a_uturn != b_uturn && !share_lane_endpoint) {
+        // 共端点的: 仅端点相交,在共享进入处扇出或在共享退出处汇聚,
+        // 不构成拓扑必须交叉,保持约束配对+更宽跳过区。即使是
+        // U-turn <-> left-turn,只要共享实际车道端点,也不能整段豁免:
+        // 它们应只在端点邻域重合,中段仍需满足同簇非端点不相交。
+        if (share_lane_endpoint) {
+            // ── 共享端点的两个U型调头：可按"内层浅拱、外层深拱"有序排列，不属于结构性交叉 ──
+            // 此处保持配对为受约束(shared_endpoint=true, 在addPairsFromSortedCluster中已设置)，
+            // evalCluster在端点附近使用18%跳过区，仅约束中段发散区；
+            // U型调头多约束求解器主动搜索lead0/lateral_bias/handle_bias候选,保持两条拱弧的横向有序。
+            continue;
+        }
+
+        // 不共端点的 U-turn 与非 U-turn 常是跨 arm 拓扑交叉；这类由连接关系决定的
+        // 结构性交叉继续豁免。共享实际端点场景已在上方保留为受约束配对。
+        if (a_is_uturn != b_is_uturn) {
             pair.exempt = CrossExemption::StructuralCross;
             continue;
         }
 
-        // 共享实际车道端点的曲线仅在该端点重合,可在共享进入处扇出或在共享退出处汇聚,
-        // 不构成拓扑必须的内部交叉,保持约束配对+更宽跳过区
-        if ((!ca->entry_lane_id.empty() && ca->entry_lane_id == cb->entry_lane_id) ||
-            (!ca->exit_lane_id.empty() && ca->exit_lane_id == cb->exit_lane_id))
-            continue;
+        // ── 弦交叉检测 (连接关系逻辑交叉豁免) ──────────────────────────
+        // 修复 BUG 1 衍生问题: 同退出组不同入口arm的右转(如 conn 21↔26, 23↔26
+        // in intersection_jd.json) 从不同方向进入同一退出组, 路径必然交叉。
+        // 现有 same_exit rank-lat 检测使用退出arm左法向投影, 无法捕捉跨arm
+        // 几何交叉。弦交叉检测直接判断两条连通的直线弦是否相交, 若相交则
+        // 任何连续曲线也必然交叉 (Jordan曲线定理推论), 属于"连接关系存在
+        // 逻辑交叉"豁免场景。
+        //
+        // 仅对非共端点对应用, 弦交点需距所有端点 > 1.5m (排除端点附近相切)。
+        if (!share_lane_endpoint) {
+            const Lane* ea = findLane(lanes, ca->entry_lane_id);
+            const Lane* xa = findLane(lanes, ca->exit_lane_id);
+            const Lane* eb = findLane(lanes, cb->entry_lane_id);
+            const Lane* xb = findLane(lanes, cb->exit_lane_id);
+            if (ea && xa && eb && xb) {
+                Vec2d p0a = entryEndpoint(ea), p1a = exitEndpoint(xa);
+                Vec2d p0b = entryEndpoint(eb), p1b = exitEndpoint(xb);
+                Vec2d isect;
+                if (segmentsIntersect(p0a, p1a, p0b, p1b, &isect)) {
+                    double min_ep_dist = std::min({
+                        (isect - p0a).norm(), (isect - p1a).norm(),
+                        (isect - p0b).norm(), (isect - p1b).norm()
+                    });
+                    if (min_ep_dist > 1.5) {
+                        pair.exempt = CrossExemption::StructuralCross;
+                        continue;
+                    }
+                }
+            }
+        }
 
         if (same_entry) {
             auto ira = entry_cluster_rank_.find(pair.id_a);
@@ -414,7 +460,8 @@ void ClusterOrderSolver::detectTopologicalInversions(
 // ─── 主构建入口 ──────────────────────────────────────────────
 void ClusterOrderSolver::build(
     const std::vector<Connectivity>& conns,
-    const std::vector<Lane>& lanes, const std::vector<LaneGroup>& laneGroups) {
+    const std::vector<Lane>& lanes, const std::vector<LaneGroup>& laneGroups,
+    const std::vector<Crosswalk>& crosswalks) {
     std::vector<Connectivity> norm_conns = conns;
     normalizeConnectivityGroups(norm_conns, lanes, laneGroups);
 
@@ -597,7 +644,7 @@ void ClusterOrderSolver::build(
     }
 
     // Step 9: 检测并标记真正的拓扑倒置为StructuralCross
-    detectTopologicalInversions(norm_conns);
+    detectTopologicalInversions(norm_conns, lanes, crosswalks);
 
     // Step 10: 构建哈希索引,使热循环中配对查找为O(1)
     buildPairIndex();

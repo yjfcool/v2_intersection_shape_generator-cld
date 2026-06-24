@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
     IntersectionInput input = IntersectionIO::loadFromFile(path);
 
     ClusterOrderSolver solver;
-    solver.build(input.connectivities, input.lanes, input.lane_groups);
+    solver.build(input.connectivities, input.lanes, input.lane_groups, input.crosswalks);
 
     printf("==== Cluster pairs involving U-turns ====\n");
     printf("%-6s %-6s %-12s %-12s %-6s %-12s %-12s %-8s %-6s\n",

@@ -6,12 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ── 性能优化: Debug模式使用-Og而非默认-O0 ──────────────────────
-# -Og 在保留调试体验的同时进行轻量优化,使Debug性能从分钟级降至秒级
-# (本工程数学计算密集,-O0下函数调用开销导致数十倍性能损失)
+# -Og 在保留调试体验的同时进行轻量优化,使Debug性能从分钟级降至秒级。
+# Debug不要定义NDEBUG: 源码中大量 #ifndef NDEBUG 分支用于低采样/跳过重优化。
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
-set(CMAKE_CXX_FLAGS_DEBUG "-g -Og -DNDEBUG" CACHE STRING "Debug flags" FORCE)
+set(CMAKE_CXX_FLAGS_DEBUG "-g -Og" CACHE STRING "Debug flags" FORCE)
 
 add_compile_definitions(PROJECT_ROOT_DIR="${PROJECT_SOURCE_DIR}")
 

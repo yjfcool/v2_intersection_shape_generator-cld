@@ -19,13 +19,14 @@ BezierSegment makeCubicG1(const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, con
 ///
 /// - lead0/lead1 使拱弧顶点(q0=p0+lead0*T0, q1=p1+lead1*(-T1))沿U型轴线对齐
 /// - arc_handle 物理基础为 (2/3)*turn_gap (经典4/3*r半圆近似, r=turn_gap/2)
-/// - min_lead0 强制最小进入延长(米)，用于"调头需跨越人行横道后开始拱弧"需求
+/// - min_lead0 强制最小进入延长(米)，用于"调头需跨越进入侧人行横道后开始拱弧"
+/// - min_lead1 强制最小退出延长(米)，用于"调头拱弧需跨越退出侧人行横道后结束"
 /// - lateral_bias(米,有符号) 沿U型横向方向对称平移两个内部控制点，
 ///   保持两端G1连续，用于扇开共享进入车道的多个U型调头
 BezierSegment makeAlignedUTurnCubic(
     const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
     double handle_scale = 1.0, double handle_bias = 0.0, double lateral_bias = 0.0,
-    double min_lead0 = 0.0);
+    double min_lead0 = 0.0, double min_lead1 = 0.0);
 
 /// 由节点点列与切向序列构造拼接Bezier曲线
 BezierCurve makeCurveFromKnots(const std::vector<Vec2d>& pts, const std::vector<Vec2d>& tans, double alpha = 0.33);

@@ -24,6 +24,11 @@ static bool isgDebugUTurn() {
     return v;
 }
 
+static bool isPureGeometricInput(const IntersectionInput& input) {
+    return input.obstacles.empty() && input.boundaries.empty() &&
+           input.crosswalks.empty() && input.stop_lines.empty();
+}
+
 // ── IntersectionInput helpers ─────────────────────────────────────────────────
 const bool IntersectionInput::IsEntryLane(const LaneId& id) const {
     for (auto& lg : lane_groups)
@@ -731,6 +736,9 @@ struct SampledCurve {
 struct SampledSiblingCurve {
     SampledCurve sampled;
     bool exempt_a1 = false;
+    int expected_side = 0;       // +1=兄弟在左, -1=兄弟在右
+    Vec2d ref_perp{0, 0};        // 配对横向参考轴
+    bool shared_endpoint = false;
 };
 
 static SampledCurve sampleCurveForIntersections(const BezierCurve& curve, int n = 32) {
@@ -865,12 +873,15 @@ static bool sampledCurvesIntersectBusiness(
 }
 
 static std::vector<SampledSiblingCurve> sampleSiblingsForIntersections(
-    const std::vector<SiblingCurve>& siblings, int n = 24) {  // 性能优化: n从32降至24
+    const std::vector<SiblingCurve>& siblings, int n = 48) {  //提升至48,避免粗采样漏检
     std::vector<SampledSiblingCurve> sampled;
     sampled.reserve(siblings.size());
     for (const auto& sib : siblings) {
         SampledSiblingCurve s;
         s.exempt_a1 = sib.exempt_a1;
+        s.expected_side = sib.expected_side;
+        s.ref_perp = sib.ref_perp;
+        s.shared_endpoint = sib.shared_endpoint;
         s.sampled = sampleCurveForIntersections(sib.curve, n);
         sampled.push_back(std::move(s));
     }
@@ -895,6 +906,59 @@ static int sampledSiblingCrossCount(
     bool constrained_only, double endpoint_tol = 1.5) {
     return sampledSiblingCrossCount(
         sampleCurveForIntersections(curve), siblings, constrained_only, endpoint_tol);
+}
+
+static double sharedEndpointSideViolation(
+    const SampledCurve& curve, const std::vector<SampledSiblingCurve>& siblings,
+    double endpoint_tol = 1.5) {
+    if (curve.pts.size() < 4)
+        return 0.0;
+
+    double violation = 0.0;
+    constexpr double SIDE_MARGIN = 0.25;
+    for (const auto& sib : siblings) {
+        if (sib.exempt_a1 || !sib.shared_endpoint)
+            continue;
+        if (sib.expected_side == 0 || sib.ref_perp.norm() < 1e-9)
+            continue;
+        if (sib.sampled.pts.size() < 4)
+            continue;
+
+        bool share_start = (curve.start - sib.sampled.start).norm() <= endpoint_tol;
+        bool share_end = (curve.end - sib.sampled.end).norm() <= endpoint_tol;
+        if (!share_start && !share_end)
+            continue;
+
+        for (const auto& pt : curve.pts) {
+            Vec2d anchor = share_start ? curve.start : curve.end;
+            double d = (pt - anchor).norm();
+            if (d <= endpoint_tol || d > 8.0)
+                continue;
+
+            double best_d2 = std::numeric_limits<double>::infinity();
+            double best_lat = 0.0;
+            for (const auto& sp : sib.sampled.pts) {
+                Vec2d sib_anchor = share_start ? sib.sampled.start : sib.sampled.end;
+                double sd = (sp - sib_anchor).norm();
+                if (sd <= endpoint_tol || sd > 8.0)
+                    continue;
+                double d2 = (sp - pt).squaredNorm();
+                if (d2 < best_d2) {
+                    best_d2 = d2;
+                    best_lat = sp.dot(sib.ref_perp);
+                }
+            }
+            if (!std::isfinite(best_d2) || best_d2 > 36.0)
+                continue;
+
+            double diff = pt.dot(sib.ref_perp) - best_lat;
+            if (sib.expected_side == +1)
+                violation += std::max(0.0, diff + SIDE_MARGIN);
+            else
+                violation += std::max(0.0, -diff + SIDE_MARGIN);
+        }
+    }
+    return violation;
 }
 
 static std::unordered_set<ConnId> crossingIdsTouchingSeeds(
@@ -928,6 +992,40 @@ static std::unordered_set<ConnId> crossingIdsTouchingSeeds(
             if (seeds.count(p.id_b))
                 bad.insert(p.id_b);
         }
+    }
+    return bad;
+}
+
+static std::unordered_set<ConnId> allConstrainedCrossingIds(
+    const std::vector<ConnectivityCurve>& results,
+    const ClusterOrderSolver& cs,
+    const std::unordered_set<ConnId>& preserved_fixed_ids,
+    double endpoint_tol = 1.5) {
+    std::unordered_set<ConnId> bad;
+    auto idx = resultIndexById(results);
+    std::unordered_map<ConnId, SampledCurve> samples;
+    samples.reserve(results.size());
+    for (const auto& cc : results)
+        if (cc.curve)
+            samples.emplace(cc.id, sampleCurveForIntersections(*cc.curve));
+
+    for (auto& p : cs.pairs()) {
+        if (p.exempt == CrossExemption::StructuralCross)
+            continue;
+        auto ia = idx.find(p.id_a), ib = idx.find(p.id_b);
+        if (ia == idx.end() || ib == idx.end())
+            continue;
+        auto sa = samples.find(p.id_a);
+        auto sb = samples.find(p.id_b);
+        if (sa == samples.end() || sb == samples.end())
+            continue;
+        if (!sampledCurvesIntersectBusiness(sa->second, sb->second, endpoint_tol))
+            continue;
+
+        if (!preserved_fixed_ids.count(p.id_a))
+            bad.insert(p.id_a);
+        if (!preserved_fixed_ids.count(p.id_b))
+            bad.insert(p.id_b);
     }
     return bad;
 }
@@ -1032,6 +1130,44 @@ static bool curveLeavesFence(const BezierCurve& curve, const Polygon2d& fence) {
     return false;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  isCurveSeverelyDivergent
+//
+//  Detects optimizer divergence: when LBFGS pushes control points far away
+//  from the p0-p1 chord, the curve becomes unusable (huge arc length, extreme
+//  curvature, self-intersection, control points far from chord).
+// ─────────────────────────────────────────────────────────────────────────────
+static bool isCurveSeverelyDivergent(
+    const BezierCurve& curve, const Vec2d& p0, const Vec2d& p1,
+    double chord_len) {
+    if (curve.empty() || chord_len < 1e-6) return false;
+
+    // (a) Self-intersection (away from endpoints) — always divergent
+    if (curveSelfIntersectsBusiness(curve, 1.0)) return true;
+
+    // (b) Arc length >> chord (way too long)
+    double arc = curve.arcLength();
+    if (arc > std::max(3.0 * chord_len + 20.0, chord_len * 5.0)) return true;
+
+    // (c) Max curvature extremely high (way too curvy)
+    double maxk = curve.maxCurvature(20);
+    if (maxk > 5.0) return true;
+
+    // (d) Any control point far from chord (e.g., > 3×chord from p0 or p1)
+    //     This catches the (75.52, 143.02) case for conn 26.
+    double far_thresh = 3.0 * chord_len + 10.0;
+    double far_thresh2 = far_thresh * far_thresh;
+    for (auto& seg : curve.segs) {
+        for (int k = 0; k < 4; ++k) {
+            const Vec2d& cp = seg.ctrl[k];
+            if ((cp - p0).squaredNorm() > far_thresh2 &&
+                (cp - p1).squaredNorm() > far_thresh2)
+                return true;
+        }
+    }
+    return false;
+}
+
 struct CurveRisk {
     bool obstacle = false;
     bool boundary = false;
@@ -1123,6 +1259,9 @@ static bool tryShapeSafeSingleCubic(
     if (!shape_bad)
         return false;
 
+    // Detect severe divergence (optimizer ran away from the chord entirely).
+    bool severely_divergent = isCurveSeverelyDivergent(curve, p0, p1, chord_len);
+
     Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : (p1 - p0).normalized();
     Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : (p1 - p0).normalized();
     BezierCurve best = curve;
@@ -1142,9 +1281,18 @@ static bool tryShapeSafeSingleCubic(
         if (curveSelfIntersectsBusiness(candidate, 1.0))
             continue;
         CurveRisk risk = assessCurveRisk(candidate, input, sdf, sampled_siblings, include_fence);
-        if (risk.physical())
+        if (!severely_divergent && risk.physical())
             continue;
-        double score = 1000.0 * risk.sibling_crosses + candidate.maxCurvature(20) + 0.02 * candidate.arcLength();
+        double penalty = severely_divergent ? 0.0 : 1000.0;
+        double score = penalty * risk.sibling_crosses + candidate.maxCurvature(20) + 0.02 * candidate.arcLength();
+        // In severely-divergent mode, always accept the first valid candidate
+        // (any non-self-intersecting single cubic beats the divergent curve).
+        if (severely_divergent && !improved) {
+            best = candidate;
+            best_score = score;
+            improved = true;
+            continue;
+        }
         if (score + 1e-6 < best_score) {
             best = candidate;
             best_score = score;
@@ -1273,7 +1421,7 @@ static double crosswalkClearanceAhead(
 struct UTurnSolverResult {
     BezierCurve curve;
     double cost = std::numeric_limits<double>::infinity();
-    int sibling_crosses = 0;
+    int sibling_crosses = std::numeric_limits<int>::max();
     double g1_min = 0.0;
     double maxk = 0.0;
     double arc_chord = 0.0;
@@ -1282,14 +1430,71 @@ struct UTurnSolverResult {
     double total_handle = 0.0;
     double lateral_bias_used = 0.0;
     double lead0_used = 0.0;
+    double lead1_used = 0.0;
     bool self_intersects = false;
 };
+
+static bool isGeometricUTurnConn(const Connectivity& conn, const IntersectionInput& input) {
+    auto e = input.entryPtDir(conn.entry_lane_id);
+    auto x = input.exitPtDir(conn.exit_lane_id);
+    return e.second.norm() > 1e-8 && x.second.norm() > 1e-8 &&
+           e.second.normalized().dot(x.second.normalized()) < -0.5;
+}
+
+static double uturnRadiusKey(const Connectivity& conn, const IntersectionInput& input) {
+    auto e = input.entryPtDir(conn.entry_lane_id);
+    auto x = input.exitPtDir(conn.exit_lane_id);
+    Vec2d p0 = e.first;
+    Vec2d p1 = x.first;
+    Vec2d T0 = e.second.norm() > 1e-8 ? e.second.normalized() : Vec2d(1, 0);
+    Vec2d T1 = x.second.norm() > 1e-8 ? x.second.normalized() : -T0;
+    Vec2d axis = T0 - T1;
+    if (axis.norm() < 1e-8)
+        axis = T0;
+    axis.normalize();
+    Vec2d lat_dir{-axis[1], axis[0]};
+    double turn_gap = std::abs((p1 - p0).dot(lat_dir));
+    return std::max(turn_gap, 0.0);
+}
+
+static int uturnRankInConstrainedFamily(
+    const Connectivity& conn, const IntersectionInput& input,
+    const ClusterOrderSolver& cs) {
+    auto is_uturn_conn = [&](const ConnId& id) {
+        const Connectivity* c = findConnectivityById(input.connectivities, id);
+        return c && isGeometricUTurnConn(*c, input);
+    };
+
+    int left_count = 0;
+    int right_count = 0;
+    for (const auto& p : cs.pairs()) {
+        if (p.exempt != CrossExemption::None)
+            continue;
+        ConnId other;
+        if (p.id_a == conn.id) other = p.id_b;
+        else if (p.id_b == conn.id) other = p.id_a;
+        else continue;
+        if (!is_uturn_conn(other))
+            continue;
+        int side = cs.expectedSideOf(other, conn.id); // other relative to current
+        if (side > 0) ++left_count;
+        else if (side < 0) ++right_count;
+    }
+    return right_count - left_count;
+}
+
 static UTurnSolverResult solveUTurnMultiConstraint(
     const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
     const IntersectionInput& input, const SDFField& sdf,
     const std::vector<SampledSiblingCurve>& sampled_siblings,
     const BezierCurve& reference,
-    double min_lead0_floor);
+    double min_lead0_floor, double min_lead1_floor,
+    int depth_preference = 0, int lead1_depth_preference = 0,
+    double lateral_preference = 0.0);
+
+// 前向声明: crosswalkClearanceBehind 定义在下方
+static double crosswalkClearanceBehind(
+    const Vec2d& p1, const Vec2d& t1, const IntersectionInput& input);
 
 static bool tryPureGeometryTopologyRepair(
     const Connectivity& conn, const IntersectionInput& input,
@@ -1297,7 +1502,8 @@ static bool tryPureGeometryTopologyRepair(
     const std::unordered_map<ConnId, size_t>& result_idx,
     const std::unordered_map<ConnId, std::vector<ConnId>>& neighbors,
     const ClusterOrderSolver& cs,
-    BezierCurve& out_curve) {
+    BezierCurve& out_curve,
+    const SDFField* repair_sdf = nullptr) {
     auto it = result_idx.find(conn.id);
     if (it == result_idx.end() || !results[it->second].curve)
         return false;
@@ -1328,9 +1534,11 @@ static bool tryPureGeometryTopologyRepair(
     bool is_uturn_geom = (t0.norm() > 1e-8 && t1.norm() > 1e-8 &&
                           angleBetween(t0, t1) > M_PI * 0.85);
     // U型调头人行横道跨越: 与 generateOne 同逻辑 —— U型调头拱弧
-    // 必须在跨越 p0 前方人行横道后才能开始。
+    // 必须在跨越 p0 前方进入侧人行横道后开始, 且跨越 p1 前方退出侧人行横道后结束。
     double uturn_min_lead0 = is_uturn_geom
         ? crosswalkClearanceAhead(p0, t0, input) : 0.0;
+    double uturn_min_lead1 = is_uturn_geom
+        ? crosswalkClearanceBehind(p1, t1, input) : 0.0;
     BezierCurve best = current;
     double best_shape = current.maxCurvature(20) + 0.02 * current.arcLength();
     bool improved = false;
@@ -1338,6 +1546,12 @@ static bool tryPureGeometryTopologyRepair(
     auto consider = [&](BezierCurve candidate) {
         if (candidate.empty() || curveSelfIntersectsBusiness(candidate, 1.0))
             return;
+        if (repair_sdf) {
+            std::vector<SampledSiblingCurve> no_siblings;
+            CurveRisk risk = assessCurveRisk(candidate, input, *repair_sdf, no_siblings);
+            if (risk.physical())
+                return;
+        }
 
         int cross_count = constrainedCrossCountForId(
             conn.id, candidate, results, result_idx, neighbors, 1.5);
@@ -1368,30 +1582,41 @@ static bool tryPureGeometryTopologyRepair(
                 if (!other_cc.curve) continue;
                 SampledSiblingCurve s;
                 s.exempt_a1 = false;  // neighbours are already constrained (non-exempt)
+                s.expected_side = cs.expectedSideOf(other_id, conn.id);
+                s.ref_perp = cs.refPerpOf(conn.id, other_id);
+                s.shared_endpoint = cs.isSharedEndpoint(conn.id, other_id);
                 s.sampled = sampleCurveForIntersections(*other_cc.curve);
                 repair_sibs.push_back(std::move(s));
             }
         }
         BezierCurve ref_arch;
         ref_arch.segs.push_back(
-            makeAlignedUTurnCubic(p0, T0, p1, T1, 1.0, 0.0, 0.0, uturn_min_lead0));
-        // 此处用空SDF: 这是纯几何修复路径(无障碍物)。
-        // 障碍物感知修复在 generateOne 中进行。
+            makeAlignedUTurnCubic(p0, T0, p1, T1, 1.0, 0.0, 0.0, uturn_min_lead0, uturn_min_lead1));
         SDFField empty_sdf;
+        const SDFField& solver_sdf = repair_sdf ? *repair_sdf : empty_sdf;
+        int family_rank = uturnRankInConstrainedFamily(conn, input, cs);
+        double lateral_pref = family_rank > 0 ? 1.0 : (family_rank < 0 ? -1.0 : 0.0);
         UTurnSolverResult sol = solveUTurnMultiConstraint(
-            p0, t0, p1, t1, input, empty_sdf, repair_sibs, ref_arch,
-            uturn_min_lead0);
+            p0, t0, p1, t1, input, solver_sdf, repair_sibs, ref_arch,
+            uturn_min_lead0, uturn_min_lead1, 0, 0, lateral_pref);
         if (std::isfinite(sol.cost) && sol.sibling_crosses < best_cross) {
-            best = sol.curve;
-            best_cross = sol.sibling_crosses;
-            best_shape = sol.maxk + 0.02 * sol.curve.arcLength();
-            improved = true;
+            bool physical_ok = true;
+            if (repair_sdf) {
+                std::vector<SampledSiblingCurve> no_siblings;
+                physical_ok = !assessCurveRisk(sol.curve, input, *repair_sdf, no_siblings).physical();
+            }
+            if (physical_ok) {
+                best = sol.curve;
+                best_cross = sol.sibling_crosses;
+                best_shape = sol.maxk + 0.02 * sol.curve.arcLength();
+                improved = true;
+            }
         }
         // 若多约束求解器未能达到零交叉, 回退到通用 ref_perp 扫描 ——
         // 该扫描采用不同
         // 候选生成(基于 ref_perp 投影), 可能找到不同解。
     } else {
-        for (double alpha : {0.10, 0.12, 0.14, 0.16, 0.18, 0.22, 0.26, 0.30, 0.34}) {
+        for (double alpha : {0.10, 0.12, 0.14, 0.16, 0.18, 0.22, 0.26, 0.30, 0.34, 0.38, 0.42, 0.46}) {
             BezierCurve candidate;
             candidate.segs.push_back(makeCubicG1(p0, T0, p1, T1, alpha));
             consider(candidate);
@@ -1419,7 +1644,7 @@ static bool tryPureGeometryTopologyRepair(
                         candidate.segs.push_back(
                             makeAlignedUTurnCubic(p0, T0, p1, T1, scale, 0.0,
                                                    ref_sign * offset,
-                                                   uturn_min_lead0));
+                                                   uturn_min_lead0, uturn_min_lead1));
                         consider(candidate);
                         if (best_cross == 0) break;
                     }
@@ -1589,7 +1814,7 @@ static bool tryObstacleBypassCandidate(
 static BezierCurve buildAlignedUTurn(
     const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
     const Vec2d& offset_dir, double offset_m, double forward_scale = 1.0,
-    double min_lead0 = 0.0) {
+    double min_lead0 = 0.0, double min_lead1 = 0.0) {
     Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
     Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : -T0;
     Vec2d axis = T0 - T1;
@@ -1615,7 +1840,7 @@ static BezierCurve buildAlignedUTurn(
 
     BezierCurve c;
     c.segs.push_back(makeAlignedUTurnCubic(p0, T0, p1, T1, forward_scale,
-                                            fwd_bias, lat_bias, min_lead0));
+                                            fwd_bias, lat_bias, min_lead0, min_lead1));
     return c;
 }
 
@@ -1698,6 +1923,64 @@ static double crosswalkClearanceAhead(
         if (found) {
             max_far += 4.0;
         }
+    }
+
+    return found ? max_far : 0.0;
+}
+
+// ── 退出侧人行横道跨越检查 ───────────────────────────────────
+//
+// 新需求: 调头真实弧段必须跨越退出侧人行横道后才能结束。
+// 本例程检查 p1(退出端点)前方(沿 exit_back = -T1 方向,即从路口向退出车道方向)
+// 是否有人行横道, 返回退出侧最小延长距离 min_lead1。
+//
+// 与 crosswalkClearanceAhead 对称:
+//   - crosswalkClearanceAhead 检查进入侧(p0沿T0方向)
+//   - crosswalkClearanceBehind 检查退出侧(p1沿exit_back=-T1方向)
+//
+// 结果作为 `min_lead1` 传给 makeAlignedUTurnCubic,
+// 强制退出反向延长段(p1 → q1)跨过退出侧人行横道后近半圆才结束。
+static double crosswalkClearanceBehind(
+    const Vec2d& p1, const Vec2d& t1,
+    const IntersectionInput& input) {
+    Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : Vec2d(1, 0);
+    Vec2d exit_back = -T1;  // 从路口向退出车道方向
+    const double search_radius = 8.0;
+    const double side_tolerance = 4.0;
+    double max_far = 0.0;
+    bool found = false;
+
+    auto consider_polyline = [&](const std::vector<Vec2d>& pts) {
+        for (size_t i = 1; i < pts.size(); ++i) {
+            const Vec2d& a = pts[i - 1];
+            const Vec2d& b = pts[i];
+            Vec2d ab = b - a;
+            double ab_len2 = ab.dot(ab);
+            if (ab_len2 < 1e-12) continue;
+            double tt = std::max(0.0, std::min(1.0, (p1 - a).dot(ab) / ab_len2));
+            Vec2d closest = a + tt * ab;
+            Vec2d d = closest - p1;
+            double lateral = std::abs(d.dot(Vec2d(-exit_back[1], exit_back[0])));
+            if (lateral > side_tolerance) continue;
+            double a_fwd = (a - p1).dot(exit_back);
+            double b_fwd = (b - p1).dot(exit_back);
+            double far = std::max(a_fwd, b_fwd);
+            if (far <= 0.0) continue;
+            if (far > search_radius) continue;
+            if (far > max_far) {
+                max_far = far;
+                found = true;
+            }
+        }
+    };
+
+    auto consider_polygon = [&](const Polygon2d& poly) {
+        if (poly.outer.size() >= 2) consider_polyline(poly.outer);
+        for (const auto& hole : poly.holes) consider_polyline(hole);
+    };
+
+    for (const auto& cw : input.crosswalks) {
+        consider_polygon(cw.geometry);
     }
 
     return found ? max_far : 0.0;
@@ -1809,7 +2092,9 @@ static UTurnSolverResult solveUTurnMultiConstraint(
     const IntersectionInput& input, const SDFField& sdf,
     const std::vector<SampledSiblingCurve>& sampled_siblings,
     const BezierCurve& reference,
-    double min_lead0_floor = 0.0) {
+    double min_lead0_floor, double min_lead1_floor,
+    int depth_preference, int lead1_depth_preference,
+    double lateral_preference) {
 
     UTurnSolverResult best;
     best.cost = std::numeric_limits<double>::infinity();
@@ -1848,11 +2133,33 @@ static UTurnSolverResult solveUTurnMultiConstraint(
     const double W_CROSS  = 1000.0;
     const double W_OBST   =  200.0;   // per metre of obstacle penetration
     const double W_FENCE  =  200.0;   // per metre of fence overflow
-    const double W_G1     =   50.0;   // per unit of (1 - cos_g1)
+    const double W_G1     =   50.0;   // fallback tie-breaker after the hard G1 gate
     const double W_MAXK   =   20.0;   // per unit maxk above 1.0
     const double W_ARCH   =    5.0;   // per unit deviation from arc/chord=1.55
     const double W_COMPACT =   0.5;   // per metre of lat/handle bias used
     const double W_LEN    =    0.1;   // per metre of arc length deviation from ref
+
+    constexpr double G1_HARD_MIN = 0.99;
+    auto physical_bad = [](double obst_pen, double fence_ovf) {
+        return obst_pen > 0.05 || fence_ovf > 0.05;
+    };
+    auto better_uturn_candidate = [&](int sib_x, double obst_pen, double fence_ovf,
+                                      double cost, const UTurnSolverResult& incumbent) {
+        if (!std::isfinite(incumbent.cost))
+            return true;
+        if (sib_x != incumbent.sibling_crosses)
+            return sib_x < incumbent.sibling_crosses;
+
+        bool bad = physical_bad(obst_pen, fence_ovf);
+        bool incumbent_bad = physical_bad(incumbent.obst_pen, incumbent.fence_overflow);
+        if (bad != incumbent_bad)
+            return !bad;
+        if (std::abs(obst_pen - incumbent.obst_pen) > 0.02)
+            return obst_pen < incumbent.obst_pen;
+        if (std::abs(fence_ovf - incumbent.fence_overflow) > 0.02)
+            return fence_ovf < incumbent.fence_overflow;
+        return cost < incumbent.cost;
+    };
 
     // ── Grid: scale × lateral_bias × lead0_extra × handle_bias.
     // 性能优化: 大幅减少候选数(原~600,现~120)以满足<1s需求
@@ -1876,18 +2183,47 @@ static UTurnSolverResult solveUTurnMultiConstraint(
         lead0_extras = {0.0};
         handle_biases = {0.0};
     } else if (turn_gap < 4.0) {
-        lat_biases = dbg_small_grid ? std::vector<double>{0.0, 1.5}
-                                    : std::vector<double>{0.0, 1.5, -1.5};
-        lead0_extras = {0.0};
+        // 扩展lateral_bias范围, 允许南北分离避免中段相交
+        lat_biases = dbg_small_grid ? std::vector<double>{0.0, 1.5, -1.5, 3.0, -3.0}
+                                    : std::vector<double>{0.0, 1.5, -1.5, 3.0, -3.0, 5.0, -5.0};
+        // 扩展lead0_extra搜索范围, 允许更深的拱弧以清理人行横道
+        lead0_extras = dbg_small_grid ? std::vector<double>{0.0, 1.0}
+                                      : std::vector<double>{0.0, 1.0, 2.0, 3.0};
         handle_biases = dbg_small_grid ? std::vector<double>{0.0}
                                        : std::vector<double>{0.0, 1.0};
     } else {
-        // Large U-turns: 需要更宽lateral_bias范围逃离左转兄弟
-        lat_biases = dbg_small_grid ? std::vector<double>{0.0, 1.5, -1.5}
-                                    : std::vector<double>{0.0, 1.5, -1.5, 3.0};
-        lead0_extras = {0.0, 2.0};
+        // Large U-turns: 需要更宽lateral_bias范围逃离左转兄弟和共端点U-turn
+        lat_biases = dbg_small_grid ? std::vector<double>{0.0, 1.5, -1.5, 3.0, -3.0}
+                                    : std::vector<double>{0.0, 1.5, -1.5, 3.0, -3.0, 5.0, -5.0};
+        // 扩展lead0_extra搜索范围, 允许更深的拱弧以清理人行横道
+        lead0_extras = dbg_small_grid ? std::vector<double>{0.0, 1.0, 2.0}
+                                      : std::vector<double>{0.0, 1.0, 2.0, 3.0, 4.0};
         handle_biases = dbg_small_grid ? std::vector<double>{0.0}
                                        : std::vector<double>{0.0, 1.5, -1.5};
+    }
+
+    // ── 根据 depth_preference 调整 lead0_extra 搜索方向 ──────────
+    // depth_preference 来源于 generateOne 中对 cluster_solver 配对的分析:
+    //   +1 = 当前U型调头应为"外层深拱" (apex更远, lead0_extra > 0)
+    //   -1 = 当前U型调头应为"内层浅拱" (apex更近, lead0_extra = 0)
+    //    0 = 无偏好 (普通搜索)
+    //
+    // 这使共端点两个U型调头通过不同拱弧深度分离: 内层浅拱 + 外层深拱,
+    // 外层包裹内层, 不再相交。例如 conn 74 (内层) vs conn 76 (外层)。
+    //
+    // 注意: 不再硬性移除lead0_extra=0, 而是作为软偏好通过W_DEPTH惩罚引导。
+    // 硬性移除会导致求解器无法找到同时满足人行横道清理和零交叉的候选。
+    // 软偏好允许求解器在必要时选择"错误"深度方向以避免交叉。
+
+    // ── 搜索 (共退出U-turn对的深度分离) ─────────
+    // 对共退出车道的U-turn对, 通过不同 lead1 (退出延长) 深度分离:
+    // 内层浅拱 lead1_extra=0, 外层深拱 lead1_extra>0。
+    // 大径U-turn(如73, turn_gap=7.6m)应深拱包围小径U-turn(如74, turn_gap=4.3m)。
+    // 同样使用软偏好, 不硬性移除lead1_extra=0。
+    std::vector<double> lead1_extras = {0.0};  // 默认不变化
+    if (turn_gap >= 1.5) {
+        lead1_extras = dbg_small_grid ? std::vector<double>{0.0, 1.0, 2.0}
+                                      : std::vector<double>{0.0, 1.0, 2.0, 3.0, 4.0, 5.0};
     }
 
     auto enforce_fence = !input.area.is_rough && !input.area.geometry.outer.empty();
@@ -1896,12 +2232,14 @@ static UTurnSolverResult solveUTurnMultiConstraint(
     for (double scale : scales) {
         for (double lat_bias : lat_biases) {
             for (double lead0_extra : lead0_extras) {
+                for (double lead1_extra : lead1_extras) {
                 for (double handle_bias : handle_biases) {
                     double eff_min_lead0 = std::max(min_lead0_floor, min_lead0_floor + lead0_extra);
+                    double eff_min_lead1 = std::max(min_lead1_floor, min_lead1_floor + lead1_extra);
                     BezierCurve cand;
                     cand.segs.push_back(makeAlignedUTurnCubic(
                         p0, T0, p1, T1, scale, handle_bias, lat_bias,
-                        eff_min_lead0));
+                        eff_min_lead0, eff_min_lead1));
                     if (cand.empty()) continue;
 
                     // ── Hard reject: self-intersection, envelope collapse/exceed
@@ -1923,15 +2261,19 @@ static UTurnSolverResult solveUTurnMultiConstraint(
                     double g1_0 = st.dot(T0);
                     double g1_1 = et.dot(T1);
                     double g1_min = std::min(g1_0, g1_1);
+                    if (g1_min < G1_HARD_MIN)
+                        continue;
 
                     // Obstacle penetration
                     double obst_pen = 0.0;
                     if (!input.obstacles.empty() && sdf.valid()) {
                         double ms = minSDFAlongCurveAdaptive(cand, sdf);
                         obst_pen = std::max(0.0, -ms);
+                        if (curveIntersectsObstacles(cand, input.obstacles))
+                            obst_pen = std::max(obst_pen, 0.10);
                     } else if (!input.obstacles.empty()) {
                         if (curveIntersectsObstacles(cand, input.obstacles))
-                            obst_pen = 0.5;  // crude penalty if no SDF
+                            obst_pen = 0.10;  // crude hard-geometry penalty if no SDF
                     }
 
                     // Fence overflow
@@ -1946,23 +2288,125 @@ static UTurnSolverResult solveUTurnMultiConstraint(
                         }
                     }
 
+                    // ── Crosswalk clearance penalty ───────
+                    // 调头真实弧段必须跨越人行横道后才能构建。检查候选曲线的拱弧顶点
+                    // (apex, 沿U型轴最远点)附近(3m内)是否进入人行横道多边形内部,
+                    // 若是则按穿透深度施加惩罚。这促使求解器选择更深的拱弧(更大
+                    // lead0_extra)以清理人行横道, 满足 (4.2) "首尾直行段都跨越人行
+                    // 横道后才能构建弧段约束"。
+                    //
+                    // 注意: 不检查首尾直行段 —— 直行段本应跨越人行横道(需求 4.2 要求),
+                    // 只有拱弧必须在人行横道外。
+                    Vec2d ut_axis_cand = (T0 - T1).normalized();
+                    if (ut_axis_cand.dot(T0) < 0) ut_axis_cand = -ut_axis_cand;
+                    auto pts_c = cand.sample(40);
+                    Vec2d apex_c = p0;
+                    double max_proj_c = -1e18;
+                    for (auto& pt : pts_c) {
+                        double proj = (pt - p0).dot(ut_axis_cand);
+                        if (proj > max_proj_c) { max_proj_c = proj; apex_c = pt; }
+                    }
+
+                    double xwalk_pen = 0.0;
+                    if (!input.crosswalks.empty()) {
+                        for (auto& pt : pts_c) {
+                            if ((pt - apex_c).norm() > 3.0) continue;  // only arc region
+                            for (const auto& cw : input.crosswalks) {
+                                if (polygonContains(cw.geometry, pt)) {
+                                    xwalk_pen += pointToPolygonDist(pt, cw.geometry);
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Cluster order violation penalty ──────────────
+                    // 对每个非豁免的共端点兄弟, 检查候选曲线的拱弧顶点是否位于正确侧。
+                    // expected_side=+1: 兄弟应在左侧 → 兄弟apex的ref_perp投影应 > 候选apex
+                    // expected_side=-1: 兄弟应在右侧 → 兄弟apex的ref_perp投影应 < 候选apex
+                    // 若违反, 按违反量施加惩罚, 促使求解器选择正确深度的拱弧。
+                    //
+                    // 这使共端点两个U型调头通过不同深度分离: 内层浅拱apex更近(更EAST),
+                    // 外层深拱apex更远(更WEST), 外层包裹内层。
+                    double order_violation = 0.0;
+                    SampledCurve cand_sample = sampleCurveForIntersections(cand);
+                    for (auto& sib : sampled_siblings) {
+                        if (sib.exempt_a1) continue;
+                        if (sib.expected_side == 0) continue;
+                        if (sib.ref_perp.norm() < 1e-9) continue;
+                        if (sib.sampled.pts.size() < 3) continue;
+
+                        // 候选曲线apex在ref_perp方向的投影
+                        double cur_apex_lat = apex_c.dot(sib.ref_perp);
+
+                        // 兄弟曲线apex (沿ut_axis最远点)
+                        Vec2d sib_apex = sib.sampled.pts[0];
+                        double sib_max_proj = -1e18;
+                        for (auto& pt : sib.sampled.pts) {
+                            double proj = (pt - p0).dot(ut_axis_cand);
+                            if (proj > sib_max_proj) { sib_max_proj = proj; sib_apex = pt; }
+                        }
+                        double sib_apex_lat = sib_apex.dot(sib.ref_perp);
+
+                        // diff = cur_lat - sib_lat (正=候选在兄弟左侧, ref_perp方向)
+                        double diff = cur_apex_lat - sib_apex_lat;
+                        double ORDER_MARGIN = 0.5;  // 米 — 最小分离量
+                        double viol = 0;
+                        if (sib.expected_side == +1) {
+                            // 兄弟在左侧 → sib_lat > cur_lat → diff应为负
+                            viol = std::max(0.0, diff + ORDER_MARGIN);
+                        } else {
+                            // 兄弟在右侧 → sib_lat < cur_lat → diff应为正
+                            viol = std::max(0.0, -diff + ORDER_MARGIN);
+                        }
+                        order_violation += viol;
+                    }
+                    double endpoint_side_violation =
+                        sharedEndpointSideViolation(cand_sample, sampled_siblings, 1.5);
+
                     if (debug && sib_x == 0) {
-                        fprintf(stderr, "[UTURN-SOLVER] ZERO-X: scale=%.2f lat=%.1f lead0=%.2f hand=%.1f maxk=%.3f g1=%.3f arc/c=%.3f\n",
-                                scale, lat_bias, eff_min_lead0, handle_bias, maxk, g1_min, arc_chord);
+                        fprintf(stderr, "[UTURN-SOLVER] ZERO-X: scale=%.2f lat=%.1f lead0=%.2f hand=%.1f maxk=%.3f g1=%.3f arc/c=%.3f xwalk=%.2f ord_viol=%.2f\n",
+                                scale, lat_bias, eff_min_lead0, handle_bias, maxk, g1_min, arc_chord, xwalk_pen, order_violation);
                     }
 
                     // ── Joint cost
+                    // W_XWALK = 2000: crosswalk clearance is a HARD requirement (4.2),
+                    // weighted 2× a sibling crossing to ensure the solver prioritizes it.
+                    // W_ORDER = 300: cluster ordering violation
+                    // W_DEPTH = 50: soft depth preference
+                    // W_LATPREF = 200: soft lateral preference — guides north/south offset
+                    //   to separate inner/outer U-turns (彻底消除中段相交)
+                    const double W_XWALK = 2000.0;
+                    const double W_ORDER = 300.0;
+                    const double W_ENDPOINT_SIDE = 500.0;
+                    const double W_DEPTH = 50.0;
+                    const double W_LATPREF = 200.0;
                     double cost = 0.0;
                     cost += W_CROSS * sib_x;
                     cost += W_OBST * obst_pen;
                     cost += W_FENCE * fence_ovf;
+                    cost += W_XWALK * xwalk_pen;
+                    cost += W_ORDER * order_violation;
+                    cost += W_ENDPOINT_SIDE * endpoint_side_violation;
                     cost += W_G1 * (1.0 - g1_min);
                     cost += W_MAXK * std::max(0.0, maxk - 1.0);
                     cost += W_ARCH * std::abs(arc_chord - 1.55);
-                    cost += W_COMPACT * (std::abs(lat_bias) + std::abs(handle_bias) + 0.3 * lead0_extra);
+                    // 软深度偏好: 惩罚"错误"深度方向
+                    if (depth_preference > 0 && lead0_extra < 0.5) cost += W_DEPTH;
+                    if (depth_preference < 0 && lead0_extra > 0.5) cost += W_DEPTH;
+                    if (lead1_depth_preference > 0 && lead1_extra < 0.5) cost += W_DEPTH;
+                    if (lead1_depth_preference < 0 && lead1_extra > 0.5) cost += W_DEPTH;
+                    // 软横向偏好: 惩罚"错误"横向方向
+                    // lateral_preference > 0: 应向 +lat_dir 偏移 (lateral_bias > 0)
+                    // lateral_preference < 0: 应向 -lat_dir 偏移 (lateral_bias < 0)
+                    if (lateral_preference > 0.5 && lat_bias < 0.5) cost += W_LATPREF;
+                    if (lateral_preference < -0.5 && lat_bias > -0.5) cost += W_LATPREF;
+                    // 修复 BUG 1 (4.2): 当有人行横道时, 降低lead0_extra的紧凑度惩罚,
+                    // 允许求解器自由选择更深的拱弧以清理人行横道。
+                    double lead0_penalty = input.crosswalks.empty() ? 0.3 : 0.05;
+                    cost += W_COMPACT * (std::abs(lat_bias) + std::abs(handle_bias) + lead0_penalty * lead0_extra);
                     cost += W_LEN * std::abs(arc - ref_len);
 
-                    if (cost < best.cost) {
+                    if (better_uturn_candidate(sib_x, obst_pen, fence_ovf, cost, best)) {
                         best.curve = cand;
                         best.cost = cost;
                         best.sibling_crosses = sib_x;
@@ -1973,12 +2417,14 @@ static UTurnSolverResult solveUTurnMultiConstraint(
                         best.fence_overflow = fence_ovf;
                         best.lateral_bias_used = lat_bias;
                         best.lead0_used = eff_min_lead0;
+                        best.lead1_used = eff_min_lead1;
                         best.self_intersects = false;
                     }
-                }
-            }
-        }
-    }
+                }  // handle_bias
+                }  // lead1_extra
+            }  // lead0_extra
+        }  // lat_bias
+    }  // scale
 
     if (debug) {
         if (std::isfinite(best.cost)) {
@@ -1990,6 +2436,126 @@ static UTurnSolverResult solveUTurnMultiConstraint(
         }
     }
 
+    // ── 深度偏好约束下仍无法零交叉时, 放宽约束重新搜索 ──────
+    // 当 depth_preference/lead1_depth_preference 强制了特定深度方向, 但所有
+    // 该方向的候选都与兄弟相交 (sib_x > 0) 时, 放宽约束: 允许 lead0_extra=0
+    // 和 lead1_extra=0 (浅拱), 重新搜索。零交叉比深度分离更重要。
+    // 注意: 放宽搜索仍需考虑人行横道清理 (4.2) 和围栏约束。
+    if (std::isfinite(best.cost) && best.sibling_crosses > 0 &&
+        (depth_preference != 0 || lead1_depth_preference != 0)) {
+        UTurnSolverResult relaxed;
+        relaxed.cost = std::numeric_limits<double>::infinity();
+        Vec2d ut_axis_r = (T0 - T1).normalized();
+        if (ut_axis_r.dot(T0) < 0) ut_axis_r = -ut_axis_r;
+        std::vector<double> rl_lead0 = {0.0, 1.0, 2.0, 3.0, 4.0};
+        std::vector<double> rl_lead1 = {0.0, 1.0, 2.0, 3.0, 4.0, 5.0};
+        for (double scale : scales) {
+            for (double lat_bias : lat_biases) {
+                for (double l0 : rl_lead0) {
+                    for (double l1 : rl_lead1) {
+                        for (double hb : handle_biases) {
+                            double em0 = std::max(min_lead0_floor, min_lead0_floor + l0);
+                            double em1 = std::max(min_lead1_floor, min_lead1_floor + l1);
+                            BezierCurve cand;
+                            cand.segs.push_back(makeAlignedUTurnCubic(
+                                p0, T0, p1, T1, scale, hb, lat_bias, em0, em1));
+                            if (cand.empty()) continue;
+                            if (curveSelfIntersectsBusiness(cand, 1.0)) continue;
+                            if (curveExceedsUTurnEnvelope(cand, reference, p0, p1)) continue;
+                            if (curveCollapsesUTurnEnvelope(cand, reference, p0, p1)) continue;
+                            int sx = sampledSiblingCrossCount(cand, sampled_siblings, true, 1.5);
+                            double mk = cand.maxCurvature(20);
+                            if (mk > maxk_phys_bound) continue;
+
+                            Vec2d st = cand.startTan().norm() > 1e-8 ? cand.startTan().normalized() : Vec2d(1, 0);
+                            Vec2d et = cand.endTan().norm()   > 1e-8 ? cand.endTan().normalized()   : Vec2d(1, 0);
+                            double g1_min = std::min(st.dot(T0), et.dot(T1));
+                            if (g1_min < G1_HARD_MIN) continue;
+
+	                            // 人行横道穿透检查
+	                            double xp = 0.0;
+	                            if (!input.crosswalks.empty()) {
+	                                auto pts_r = cand.sample(40);
+                                Vec2d ap = p0; double mp = -1e18;
+                                for (auto& pt : pts_r) {
+                                    double pr = (pt - p0).dot(ut_axis_r);
+                                    if (pr > mp) { mp = pr; ap = pt; }
+                                }
+                                for (auto& pt : pts_r) {
+                                    if ((pt - ap).norm() > 3.0) continue;
+	                                    for (const auto& cw : input.crosswalks)
+	                                        if (polygonContains(cw.geometry, pt))
+	                                            xp += pointToPolygonDist(pt, cw.geometry);
+	                                }
+	                            }
+
+	                            double obst_pen = 0.0;
+	                            if (!input.obstacles.empty() && sdf.valid()) {
+	                                double ms = minSDFAlongCurveAdaptive(cand, sdf);
+	                                obst_pen = std::max(0.0, -ms);
+	                                if (curveIntersectsObstacles(cand, input.obstacles))
+	                                    obst_pen = std::max(obst_pen, 0.10);
+	                            } else if (!input.obstacles.empty()) {
+	                                if (curveIntersectsObstacles(cand, input.obstacles))
+	                                    obst_pen = 0.10;
+	                            }
+
+	                            double fence_ovf = 0.0;
+	                            if (enforce_fence) {
+	                                auto pts_f = cand.sample(24);
+	                                for (int k = 1; k + 1 < (int)pts_f.size(); ++k) {
+	                                    if (!polygonContains(fence, pts_f[k])) {
+	                                        double d = pointToPolygonDist(pts_f[k], fence);
+	                                        if (d > fence_ovf) fence_ovf = d;
+	                                    }
+	                                }
+	                            }
+
+	                            // 代价: 零交叉与人行横道同等重要, 横向偏好次之, 曲率/弧长最后
+	                            SampledCurve cand_sample = sampleCurveForIntersections(cand);
+	                            double endpoint_side_violation =
+	                                sharedEndpointSideViolation(cand_sample, sampled_siblings, 1.5);
+	                            double c = W_CROSS * sx
+	                                     + W_OBST * obst_pen + W_FENCE * fence_ovf
+	                                     + 2000.0 * xp
+	                                     + 500.0 * endpoint_side_violation
+	                                     + W_MAXK * std::max(0.0, mk - 1.0)
+	                                     + 0.02 * cand.arcLength();
+                            // 横向偏好惩罚
+                            const double W_LATPREF_R = 200.0;
+                            if (lateral_preference > 0.5 && lat_bias < 0.5) c += W_LATPREF_R;
+                            if (lateral_preference < -0.5 && lat_bias > -0.5) c += W_LATPREF_R;
+	                            if (better_uturn_candidate(sx, obst_pen, fence_ovf, c, relaxed)) {
+	                                relaxed.curve = cand;
+	                                relaxed.cost = c;
+	                                relaxed.sibling_crosses = sx;
+	                                relaxed.g1_min = g1_min;
+	                                relaxed.maxk = mk;
+	                                relaxed.lead0_used = em0;
+	                                relaxed.lead1_used = em1;
+	                                relaxed.lateral_bias_used = lat_bias;
+	                                relaxed.obst_pen = obst_pen;
+	                                relaxed.fence_overflow = fence_ovf;
+	                            }
+                            if (sx == 0 && xp < 0.5) break;
+                        }
+                        if (relaxed.sibling_crosses == 0) break;
+                    }
+                    if (relaxed.sibling_crosses == 0) break;
+                }
+                if (relaxed.sibling_crosses == 0) break;
+            }
+            if (relaxed.sibling_crosses == 0) break;
+        }
+        if (std::isfinite(relaxed.cost) && relaxed.sibling_crosses < best.sibling_crosses) {
+            best = relaxed;
+            if (debug) {
+                fprintf(stderr, "[UTURN-SOLVER] RELAXED: sib_x=%d lead0=%.1f lat=%.1f\n",
+                        best.sibling_crosses, best.lead0_used, best.lateral_bias_used);
+            }
+        }
+    }
+
     return best;
 }
 
@@ -1998,7 +2564,7 @@ static bool tryBoundedUTurnCandidate(
     const IntersectionInput& input, const SDFField& sdf,
     const std::vector<SampledSiblingCurve>& sampled_siblings,
     const BezierCurve& reference, BezierCurve& out_curve,
-    double min_lead0 = 0.0) {
+    double min_lead0 = 0.0, double min_lead1 = 0.0) {
     Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
     Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : -T0;
     Vec2d axis = T0 - T1;
@@ -2039,7 +2605,7 @@ static bool tryBoundedUTurnCandidate(
     for (double scale : {0.85, 0.70, 0.55, 0.40, 1.0, 0.30}) {
         for (const auto& dir : dirs) {
             for (double mag : {0.0, 1.0, 2.0, 3.0, 4.5, 6.0}) {
-                BezierCurve candidate = buildAlignedUTurn(p0, t0, p1, t1, dir, mag, scale, min_lead0);
+                BezierCurve candidate = buildAlignedUTurn(p0, t0, p1, t1, dir, mag, scale, min_lead0, min_lead1);
                 if (candidate.empty() || curveSelfIntersectsBusiness(candidate, 1.0))
                     continue;
                 if (curveExceedsUTurnEnvelope(candidate, reference, p0, p1))
@@ -2114,11 +2680,14 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     //   This prevents choosing a bypass direction that conflicts with existing curves.
     BezierCurve initial;
     // U-turn-specific: crosswalk clearance distance (metres).  New requirement:
-    // 调头必须跨越人行横道后才能开始拱弧.  Computed once here and threaded
-    // through buildAlignedUTurn → makeAlignedUTurnCubic as `min_lead0`.
+    // 调头真实弧段必须跨越进入侧和退出侧双侧人行横道。
+    // - uturn_min_lead0: 进入侧人行横道跨越距离, 传给 makeAlignedUTurnCubic 作为 min_lead0
+    // - uturn_min_lead1: 退出侧人行横道跨越距离, 传给 makeAlignedUTurnCubic 作为 min_lead1
     double uturn_min_lead0 = 0.0;
+    double uturn_min_lead1 = 0.0;
     if (is_uturn_geom) {
         uturn_min_lead0 = crosswalkClearanceAhead(p0, t0, input);
+        uturn_min_lead1 = crosswalkClearanceBehind(p1, t1, input);
     }
 
     // Sampled-siblings cache — needed by the U-turn multi-constraint solver
@@ -2131,7 +2700,124 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
         return sampled_siblings;
     };
 
+    // ── 修复 74|76: 拱弧深度偏好 (depth_preference) ──────────────────────
+    // +1 = 当前U型调头应为"外层深拱" (apex更远, lead0_extra > 0)
+    // -1 = 当前U型调头应为"内层浅拱" (apex更近, lead0_extra = 0)
+    //  0 = 无偏好 (普通搜索)
+    // 声明在 is_uturn_geom 分支外, 以便后续在优化器跳过逻辑中使用。
+    //
+    // 计算方法: 遍历所有共进入车道U-turn配对, 累计 deeper_count 和 shallower_count。
+    // net = deeper_count - shallower_count。
+    // 若 net > 0 → DEEPER; net < 0 → SHALLOWER; net == 0 → 无偏好。
+    // 这正确处理"中间"U-turn (如 74 在 72 和 76 之间): 它应比 72 深、比 76 浅,
+    // net=0, 使用默认搜索。
+    int depth_preference = 0;      // lead0 (共进入) 深度偏好
+    int lead1_depth_preference = 0; // lead1 (共退出) 深度偏好, 修复 74|73
+    // lateral_preference: 横向偏置偏好
+    // +1.0 = 当前U型调头应横向偏移到 +lat_dir 方向 (内层)
+    // -1.0 = 当前U型调头应横向偏移到 -lat_dir 方向 (外层)
+    // 0.0 = 无偏好
+    // 这使内层U-turn (如74)的弧线南北偏移, 与外层U-turn (如76/73)分离, 彻底消除中段相交。
+    double lateral_preference = 0.0;
+
     if (is_uturn_geom) {
+        // ── 同端点U-turn家族深度偏好 ──────────────────────────────
+        // 大径U-turn应作为外层深拱包裹小径U-turn。此前这里从
+        // expected_side/ref_perp/axis 符号反推"深/浅", 在不同arm方向下会翻转,
+        // 例如 100000643 中 75(turn_gap=11.3m) 被判成浅拱,
+        // 76(turn_gap=8.0m) 被判成深拱, 导致二者中段相交。
+        //
+        // 现在直接使用几何半径键(turn_gap)排序:
+        // - 共进入实际车道: 大径给 lead0 更深, 小径更浅;
+        // - 共退出实际车道: 大径给 lead1 更深, 小径更浅。
+        // 中间半径会同时有更大/更小兄弟, 净偏好自然为0。
+        {
+            int deeper_count = 0, shallower_count = 0;
+            int lead1_deeper = 0, lead1_shallower = 0;
+            double current_radius = uturnRadiusKey(conn, input);
+
+            for (const auto& pair : cluster_solver_.pairs()) {
+                if (pair.exempt != CrossExemption::None) continue;
+                ConnId other_id;
+                if (pair.id_a == conn.id) other_id = pair.id_b;
+                else if (pair.id_b == conn.id) other_id = pair.id_a;
+                else continue;
+
+                // 查找 other conn
+                const Connectivity* other_conn = nullptr;
+                for (const auto& c : input.connectivities) {
+                    if (c.id == other_id) { other_conn = &c; break; }
+                }
+                if (!other_conn) continue;
+
+                // other 必须也是 U-turn (几何判断)
+                if (!isGeometricUTurnConn(*other_conn, input)) continue;
+                double other_radius = uturnRadiusKey(*other_conn, input);
+                if (std::abs(current_radius - other_radius) < 0.5) continue;
+                int dp = (current_radius > other_radius) ? +1 : -1;
+
+                // 区分共进入 vs 共退出
+                bool shared_entry = (other_conn->entry_lane_id == conn.entry_lane_id &&
+                                     other_conn->exit_lane_id != conn.exit_lane_id);
+                bool shared_exit = (other_conn->exit_lane_id == conn.exit_lane_id &&
+                                    other_conn->entry_lane_id != conn.entry_lane_id);
+
+                if (shared_entry) {
+                    if (dp > 0) ++deeper_count;
+                    else if (dp < 0) ++shallower_count;
+                } else if (shared_exit) {
+                    // 共退出: lead1 深度偏好
+                    if (dp > 0) ++lead1_deeper;
+                    else if (dp < 0) ++lead1_shallower;
+                }
+
+                // ── 横向偏好计算 (修复 74|76, 74|73 彻底分离) ──────────────────
+                // expected_side=+1 (兄弟应在ref_perp左侧): 当前应在兄弟右侧 → lateral_bias<0
+                // expected_side=-1 (兄弟应在ref_perp右侧): 当前应在兄弟左侧 → lateral_bias>0
+                // 但lateral_bias是沿U-turn的lat_dir(南北)方向, 需转换为ref_perp符号。
+                // lat_dir与ref_perp的投影决定lateral_bias的正负方向。
+                // 简化: lateral_preference = sign(expected_side) × sign(lat_dir · ref_perp)
+                // 即: 当前应在兄弟左侧 → lateral_preference>0 (向北); 右侧 → <0 (向南)
+                // 注意: 这里取"内层"方向 (与兄弟反向), 使内层弧线偏移到外层弧线的内侧。
+                {
+                    int es = cluster_solver_.expectedSideOf(other_id, conn.id);
+                    Vec2d rp = cluster_solver_.refPerpOf(conn.id, other_id);
+                    if (es == 0 || rp.norm() < 1e-9)
+                        continue;
+                    Vec2d T0_n = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
+                    Vec2d T1_n = t1.norm() > 1e-8 ? t1.normalized() : Vec2d(1, 0);
+                    Vec2d ot_axis = (T0_n - T1_n).normalized();
+                    if (ot_axis.dot(T0_n) < 0) ot_axis = -ot_axis;
+                    Vec2d lat_dir{-ot_axis[1], ot_axis[0]};
+                    double lat_ref_proj = lat_dir.dot(rp.normalized());
+                    if (std::abs(lat_ref_proj) > 0.1) {
+                        // 当前应在兄弟的expected_side方向 → 横向偏移到该侧
+                        // lateral_bias > 0 沿 +lat_dir, < 0 沿 -lat_dir
+                        // 若 es=+1 (兄弟在左, ref_perp方向): 当前应在左 → lateral_bias使弧线向ref_perp方向偏
+                        // lat_dir·ref_perp > 0: +lat_dir方向 = +ref_perp方向 → lateral_bias > 0
+                        // lat_dir·ref_perp < 0: +lat_dir方向 = -ref_perp方向 → lateral_bias < 0
+                        // 即: lateral_preference = es × sign(lat_ref_proj)
+                        // 但内层U-turn应向"内侧"偏移 (朝向兄弟), 外层U-turn向"外侧"偏移 (远离兄弟)
+                        // 简化: 内层(es=+1)向ref_perp正向偏, 外层(es=-1)向ref_perp负向偏
+                        // lateral_preference = es × sign(lat_ref_proj)
+                        double lp = es * (lat_ref_proj > 0 ? 1.0 : -1.0);
+                        // 累加: 取最强的偏好
+                        if (std::abs(lp) > std::abs(lateral_preference))
+                            lateral_preference = lp;
+                    }
+                }
+            }
+            int net = deeper_count - shallower_count;
+            depth_preference = (net > 0) ? +1 : (net < 0 ? -1 : 0);
+            int lead1_net = lead1_deeper - lead1_shallower;
+            lead1_depth_preference = (lead1_net > 0) ? +1 : (lead1_net < 0 ? -1 : 0);
+            if (isgDebugUTurn()) {
+                fprintf(stderr, "[UTURN-DEPTHPREF] conn=%s depth_pref=%d lead1_pref=%d lateral_pref=%.1f (deeper=%d shallower=%d l1d=%d l1s=%d)\n",
+                        conn.id.c_str(), depth_preference, lead1_depth_preference, lateral_preference,
+                        deeper_count, shallower_count, lead1_deeper, lead1_shallower);
+            }
+        }
+
         // ── Multi-constraint U-turn solver (round 3 redesign).
         //
         // The old flow built a naive initial U-turn with buildAlignedUTurn
@@ -2154,16 +2840,18 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
         // Reference for envelope checks: a "default" arch from buildAlignedUTurn.
         BezierCurve ref_arch = buildAlignedUTurn(p0, t0, p1, t1,
                                                   Vec2d{-t0.normalized().y(), t0.normalized().x()},
-                                                  0.0, 1.0, uturn_min_lead0);
+                                                  0.0, 1.0, uturn_min_lead0, uturn_min_lead1);
 
 #ifndef NDEBUG
         // Debug模式: 跳过solveUTurnMultiConstraint网格搜索,直接用ref_arch
         // (Debug下网格搜索耗时过大,Release模式恢复完整搜索)
         initial = ref_arch;
         (void)sampled;
+        (void)depth_preference;
 #else
         UTurnSolverResult uturn_sol = solveUTurnMultiConstraint(
-            p0, t0, p1, t1, input, sdf, sampled, ref_arch, uturn_min_lead0);
+            p0, t0, p1, t1, input, sdf, sampled, ref_arch, uturn_min_lead0, uturn_min_lead1,
+            depth_preference, lead1_depth_preference, lateral_preference);
 
         if (std::isfinite(uturn_sol.cost)) {
             initial = uturn_sol.curve;
@@ -2306,9 +2994,10 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
         const auto& sampled = ensure_sampled_siblings();
         BezierCurve ref_arch = buildAlignedUTurn(p0, t0, p1, t1,
                                                   Vec2d{-t0.normalized().y(), t0.normalized().x()},
-                                                  0.0, 1.0, uturn_min_lead0);
+                                                  0.0, 1.0, uturn_min_lead0, uturn_min_lead1);
         UTurnSolverResult uturn_sol = solveUTurnMultiConstraint(
-            p0, t0, p1, t1, input, sdf, sampled, ref_arch, uturn_min_lead0);
+            p0, t0, p1, t1, input, sdf, sampled, ref_arch, uturn_min_lead0, uturn_min_lead1,
+            0, 0, 0.0);  // repair pass: no preferences (already set in initial)
         if (std::isfinite(uturn_sol.cost) &&
             uturn_sol.sibling_crosses <
                 sampledSiblingCrossCount(initial, sampled, true, 1.5)) {
@@ -2361,8 +3050,8 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
         // (原代码再次调用 solveUTurnMultiConstraint,但首次调用已穷举搜索,
         //  二次调用极少改进且耗时显著)
         int current_cross = sampledSiblingCrossCount(initial, sampled_for_gate, true, 1.5);
-        if (current_cross == 0) {
-            // Initial already has zero crossings — accept immediately.
+        if (current_cross == 0 && !risk.physical() && !fixed_shape_cross) {
+            // Initial already has zero crossings and no physical risk.
             setConnectivityCurveGeometry(cc, initial);
             validate(cc, input, sdf);
             return cc;
@@ -2407,8 +3096,20 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     opt = optimiseCurve(cost, solver_, initial, /*outer_iters=*/3);
 #endif
 
+    // ── Post-optimization divergence safeguard ───────────────────────────────
+    double chord_len = (p1 - p0).norm();
+    if (isCurveSeverelyDivergent(opt, p0, p1, chord_len)) {
+        opt = initial;
+    }
+
     bool skip_band = true; // always skip: preserve G1, rely on optimizer
     BezierCurve final_c = postProcess(opt, sdf, input.area.geometry, 0.25, t0, t1, skip_band, &p0, &p1);
+
+    // Re-check after postProcess (adaptiveRefine + opt may have diverged again)
+    if (isCurveSeverelyDivergent(final_c, p0, p1, chord_len)) {
+        final_c = initial;
+    }
+
     bool shape_risk = is_uturn_geom &&
         (curveExceedsUTurnEnvelope(final_c, initial, p0, p1) ||
          curveCollapsesUTurnEnvelope(final_c, initial, p0, p1));
@@ -2418,7 +3119,7 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     if (is_uturn_geom && shape_risk) {
         BezierCurve fallback = initial;
         if (tryBoundedUTurnCandidate(p0, t0, p1, t1, input, sdf, sampled_for_gate,
-                                     initial, fallback, uturn_min_lead0)) {
+                                     initial, fallback, uturn_min_lead0, uturn_min_lead1)) {
             final_c = fallback;
         } else {
             final_c = initial;
@@ -2434,6 +3135,42 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
             final_risk = assessCurveRisk(final_c, input, sdf, sampled_for_gate, enforce_fence);
         }
     }
+
+    // ── U-turn crosswalk clearance safeguard (BUG 1 / requirement 4.2) ────────
+    // 修复 BUG 1 (4.2): 优化器可能将U型调头拱弧拉回人行横道内部, 违反
+    // "首尾直行段都跨越人行横道后才能构建弧段约束"。检测最终曲线的拱弧顶点
+    // (apex, 沿U型轴最远点)是否进入人行横道多边形, 若是则回退到初始曲线
+    // (初始曲线由 solveUTurnMultiConstraint 生成, 已考虑人行横道清理)。
+    //
+    // 注意: 仅检查拱弧顶点附近(3m内), 不检查首尾直行段 —— 直行段本应跨越
+    // 人行横道(需求 4.2 要求), 只有拱弧必须在人行横道外。
+    if (is_uturn_geom && !input.crosswalks.empty()) {
+        auto pts = final_c.sampleByArcLength(80);
+        // Find apex: furthest point along U-turn axis
+        Vec2d ut_axis = (t0 - t1).normalized();
+        if (ut_axis.dot(t0) < 0) ut_axis = -ut_axis;
+        Vec2d apex_pt = p0;
+        double max_proj = -1e18;
+        for (auto& pt : pts) {
+            double proj = (pt - p0).dot(ut_axis);
+            if (proj > max_proj) { max_proj = proj; apex_pt = pt; }
+        }
+        // Check apex and nearby points (within 3m = arc region)
+        double xwalk_pen = 0.0;
+        for (auto& pt : pts) {
+            if ((pt - apex_pt).norm() > 3.0) continue;
+            for (const auto& cw : input.crosswalks) {
+                if (polygonContains(cw.geometry, pt)) {
+                    xwalk_pen += pointToPolygonDist(pt, cw.geometry);
+                }
+            }
+        }
+        if (xwalk_pen > 0.5) {
+            // Optimizer pulled arc into crosswalk — revert to initial curve.
+            final_c = initial;
+        }
+    }
+
     if (!is_uturn_geom)
         tryShapeSafeSingleCubic(p0, t0, p1, t1, input, sdf, sampled_for_gate, enforce_fence, final_c);
     if (out_physical_risk) {
@@ -2469,7 +3206,7 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
         sdf_coarse.build(roi, input.obstacles, 0.5, 0.4);
 
     // Build group-based cluster solver
-    cluster_solver_.build(input.connectivities, input.lanes, input.lane_groups);
+    cluster_solver_.build(input.connectivities, input.lanes, input.lane_groups, input.crosswalks);
 
     // Build generation order
     GlobalCoordinator coord;
@@ -2588,7 +3325,13 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
     const int max_repairs_per_pass = 3;
 #endif
     for (int repair_pass = 0; repair_pass < max_repair_passes; ++repair_pass) {
+        result_idx = resultIndexById(results);
+        all_done = curveMapFromResults(results);
+        auto neighbors = constrainedNeighborMap(results, cluster_solver_);
         auto bad = crossingIdsTouchingSeeds(results, cluster_solver_, physical_risk_ids, 1.5);
+        auto cluster_bad = allConstrainedCrossingIds(
+            results, cluster_solver_, preserved_fixed_ids, 1.5);
+        bad.insert(cluster_bad.begin(), cluster_bad.end());
         if (bad.empty())
             break;
         int repaired_count = 0;
@@ -2604,12 +3347,30 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
                 auto* conn = cmap[cid];
                 if (!conn)
                     continue;
-                auto sibs = buildSiblings(cid, all_done, cluster_solver_, input.connectivities, false, &preserved_fixed_ids);
-                bool phys_risk = false;
-                auto cc = generateOne(*conn, input, sdf, sdf_coarse, sibs, true, &phys_risk);
                 auto ri = result_idx.find(cid);
                 if (ri == result_idx.end())
                     continue;
+
+                bool is_uturn_candidate = isGeometricUTurnConn(*conn, input);
+                BezierCurve topo_repaired;
+                if (!is_uturn_candidate &&
+                    tryPureGeometryTopologyRepair(
+                        *conn, input, results, result_idx, neighbors,
+                        cluster_solver_, topo_repaired, &sdf)) {
+                    setConnectivityCurveGeometry(results[ri->second], topo_repaired);
+                    validate(results[ri->second], input, sdf);
+                    all_done[cid] = topo_repaired;
+                    if (results[ri->second].status == CurveStatus::Degraded)
+                        physical_risk_ids.insert(cid);
+                    else
+                        physical_risk_ids.erase(cid);
+                    ++repaired_count;
+                    continue;
+                }
+
+                auto sibs = buildSiblings(cid, all_done, cluster_solver_, input.connectivities, false, &preserved_fixed_ids);
+                bool phys_risk = false;
+                auto cc = generateOne(*conn, input, sdf, sdf_coarse, sibs, true, &phys_risk);
                 results[ri->second] = std::move(cc);
                 if (results[ri->second].curve)
                     all_done[cid] = *results[ri->second].curve;

@@ -47,3 +47,7 @@ target_include_directories(diag_cluster_pairs PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_executable(diag_pair_isect diag_pair_isect.cpp)
 target_link_libraries(diag_pair_isect PRIVATE intersection_gen_lib)
 target_include_directories(diag_pair_isect PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_executable(diag_focus diag_focus.cpp)
+target_link_libraries(diag_focus PRIVATE intersection_gen_lib)
+target_include_directories(diag_focus PRIVATE ${CMAKE_SOURCE_DIR}/src)

@@ -400,7 +400,7 @@ BezierSegment makeCubicG1(const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, con
 BezierSegment makeAlignedUTurnCubic(
     const Vec2d& p0, const Vec2d& t0, const Vec2d& p1, const Vec2d& t1,
     double handle_scale, double handle_bias, double lateral_bias,
-    double min_lead0) {
+    double min_lead0, double min_lead1) {
     Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : Vec2d(1, 0);
     Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : -T0;
     Vec2d exit_back = -T1;
@@ -451,20 +451,35 @@ BezierSegment makeAlignedUTurnCubic(
     }
     turn_gap_base = std::max(turn_gap_base, 0.15);
 
-    // ── Step 1.5: Apply crosswalk clearance (min_lead0) ONLY when turn_gap
-    // is large enough to physically support a U-turn.  For tiny turn_gap
-    // (< 1.5m, conns 66/87/93/115), the U-turn is a "virtual" geometry
-    // (vehicle cannot physically turn around in sub-metre space) — applying
-    // min_lead0 here creates "long straight + pinch + long straight" which
-    // produces singular curvature at the apex (B'(0.5) ≈ 0 when T0 ≈ -T1).
-    // Skip min_lead0 for tiny turn_gap; the crosswalk requirement is only
-    // meaningful for real-sized U-turns.
-    if (min_lead0 > 0.0 && turn_gap_base >= 1.5) {
+    // ── Step 1.5: Apply crosswalk clearance (min_lead0/min_lead1) ONLY when
+    // turn_gap is large enough to physically support a U-turn.  For tiny
+    // turn_gap (< 1.5m), the U-turn is a "virtual" geometry — applying
+    // min_lead0/min_lead1 here creates "long straight + pinch + long straight"
+    // which produces singular curvature at the apex.
+    //
+    // 新需求: 调头真实弧段必须跨越进入侧和退出侧双侧人行横道。
+    // - min_lead0 强制进入延长段(p0→q0)跨越进入侧人行横道
+    // - min_lead1 强制退出反向延长段(p1→q1)跨越退出侧人行横道
+    // 两者独立施加, 取最大值保证两侧都跨越。
+    if (turn_gap_base >= 1.5) {
         if (min_lead0 > lead0) {
-            double extra = min_lead0 - lead0;
             lead0 = min_lead0;
-            // Symmetrically extend lead1 so axis-projection balance is preserved.
-            lead1 += extra * (c0 / std::max(1e-3, c1));
+        }
+        if (min_lead1 > lead1) {
+            lead1 = min_lead1;
+        }
+        // 重新对齐轴线投影: 取两侧中较大的common_s
+        double s0_new = p0.dot(axis) + lead0 * T0.dot(axis);
+        double s1_new = p1.dot(axis) + lead1 * exit_back.dot(axis);
+        double common_s_new = std::max(s0_new, s1_new);
+        // 若两侧投影不平衡, 补偿较短侧
+        if (s0_new < common_s_new - 1e-6) {
+            double extra = (common_s_new - s0_new) / std::max(0.2, T0.dot(axis));
+            lead0 += extra;
+        }
+        if (s1_new < common_s_new - 1e-6) {
+            double extra = (common_s_new - s1_new) / std::max(0.2, exit_back.dot(axis));
+            lead1 += extra;
         }
     }
 
@@ -568,8 +583,10 @@ BezierSegment makeAlignedUTurnCubic(
         clamped_lateral_bias = 0.0;
     } else {
         double total_handle = lead0 + arc_handle;
-        double max_tan = (turn_gap >= 4.0) ? 0.577   // tan(30°), cos ≥ 0.866
-                                            : 0.268;  // tan(15°), cos ≥ 0.966
+        // 放宽lateral_bias钳制, 允许更大的横向偏移以彻底分离共端点U-turn
+        // tan(45°)=1.0 (cos ≥ 0.707), 仍保持G1连续但允许更大的横向分离
+        double max_tan = (turn_gap >= 4.0) ? 1.0    // tan(45°), cos ≥ 0.707
+                                            : 0.577;  // tan(30°), cos ≥ 0.866
         double max_lateral = max_tan * total_handle;
         clamped_lateral_bias = std::max(-max_lateral,
                                          std::min(max_lateral, lateral_bias));

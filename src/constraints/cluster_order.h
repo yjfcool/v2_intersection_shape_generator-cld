@@ -48,7 +48,8 @@ class SDFField;
 class ClusterOrderSolver {
 public:
     /// 构造簇排序与配对约束
-    void build(const std::vector<Connectivity>&, const std::vector<Lane>&, const std::vector<LaneGroup>&);
+    void build(const std::vector<Connectivity>&, const std::vector<Lane>&, const std::vector<LaneGroup>&,
+               const std::vector<Crosswalk>& crosswalks = {});
 
     /// 标记障碍物豁免：当点pt位于障碍物SDF<半径r时设置ObstacleCross
     void markObstacleExempt(CurvePair&, const Vec2d&, const SDFField&, double r = 1.5);
@@ -87,7 +88,8 @@ private:
 
     static bool hasPair(const std::vector<CurvePair>& pairs, const ConnId& a, const ConnId& b);
 
-    void detectTopologicalInversions(const std::vector<Connectivity> &);
+    void detectTopologicalInversions(const std::vector<Connectivity> &, const std::vector<Lane> &,
+                                     const std::vector<Crosswalk> &crosswalks);
 
     // ── 性能优化: 哈希索引，key为每个pair中字典序较小的ConnId
     // 在 build() 末尾构建，供 exemptionOf / expectedSideOf / refPerpOf /
