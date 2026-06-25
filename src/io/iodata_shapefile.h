@@ -38,7 +38,7 @@ static bool save(IntersectionInput& inp, std::string out_dir, std::string prefix
         std::vector<ShapeRecord> records = {};
         for (int i = 0; i < lanes.size(); ++i) {
             const auto& pl = lanes[i];
-            std::vector<std::string> attrs = {pl.id, "-1", "", ""};
+            std::vector<std::string> attrs = {pl.id, "-1", pl.groupId, ""};
             std::vector<ShapePoint> points = toShapepoints(pl.geometry.points);
             ShapeRecord record(i, shpType, attrs, points, {0});
             records.emplace_back(record);
@@ -60,7 +60,7 @@ static bool save(IntersectionInput& inp, std::string out_dir, std::string prefix
         std::vector<ShapeRecord> records = {};
         for (int i = 0; i < edgelines.size(); ++i) {
             const auto& pl = edgelines[i];
-            std::vector<std::string> attrs = {pl.id, "-1", "", "", ""};
+            std::vector<std::string> attrs = {pl.id, "-1", pl.groupId, "", ""};
             std::vector<ShapePoint> points = toShapepoints(pl.geometry.points);
             ShapeRecord record = {
                 i, shpType, attrs, points, {0}
@@ -196,18 +196,27 @@ static bool save(IntersectionOutput& out, std::string out_dir, std::string prefi
             {"TURN_TYPE", 'C', 64, 0},
             {"FLANE", 'C', 64, 0},
             {"TLANE", 'C', 64, 0},
+            {"LANE_TYPE", 'C', 64, 0},
+            {"FIXED_SHAPE", 'C', 64, 0},
         };
         int gid = -1;
         int shpType = SHP_POLYLINEZ;
         std::vector<ShapeRecord> records = {};
         for (int i = 0; i < lanes.size(); ++i) {
             const auto& pl = lanes[i];
-            if (!pl.curve || pl.curve->numSegments() == 0)
-                continue;
             std::vector<std::string> attrs = {
-                pl.id, std::to_string((int)pl.turn_type), pl.entry_lane_id, pl.exit_lane_id
+                pl.id, std::to_string((int)pl.turn_type), pl.entry_lane_id, pl.exit_lane_id,
+                std::to_string((int)pl.lane_type),(pl.fixed_shape?"1":"0")
             };
-            std::vector<ShapePoint> points = toShapepoints(pl.curve->sampleByShape());
+            // points
+            std::vector<ShapePoint> points;
+            if (!pl.geometry.points.empty()) {
+                points = toShapepoints(pl.geometry.points);
+            } else {
+                if (!pl.curve || pl.curve->numSegments() == 0)
+                    continue;
+                points = toShapepoints(pl.curve->sampleByShape());
+            }
             ShapeRecord record = {
                 ++gid, shpType, attrs, points, {0}
             };

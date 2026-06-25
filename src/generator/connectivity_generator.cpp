@@ -697,6 +697,7 @@ static ConnectivityCurve makeFixedGeometryCurve(
     cc.exit_lane_id = conn.exit_lane_id;
     cc.turn_type = conn.turn_type;
     cc.geometry = conn.geometry;
+    cc.fixed_shape = conn.fixed_shape;
     BezierCurve curve = fixedGeometryToCurve(conn, input);
     if (!curve.empty())
         cc.curve = std::make_shared<BezierCurve>(curve);
@@ -1526,8 +1527,7 @@ static bool tryPureGeometryTopologyRepair(
     Vec2d T0 = t0.norm() > 1e-8 ? t0.normalized() : chord.normalized();
     Vec2d T1 = t1.norm() > 1e-8 ? t1.normalized() : chord.normalized();
     // ── U-turn awareness: if endpoints are nearly anti-parallel, the generic
-    // makeCubicG1 候选会生成扁平S形, 曲率很高(8-9 1/m)且横向凸起小——
-    // 正是 conn 67/69/94/88/90/116 上报告的"扁平U型调头"缺陷。
+    // makeCubicG1 候选会生成扁平S形, 曲率很高(8-9 1/m)且横向凸起小的"扁平U型调头"缺陷。
     // 前置检测此情形, 在alpha扫描与横向偏移扫描中改用 makeAlignedUTurnCubic
     // (生成正确拱弧U型调头)。lateral_bias 参数在保持G1的同时侧向平移顶点,
     // 故 ref_perp 偏移搜索仍然适用。
@@ -1566,12 +1566,9 @@ static bool tryPureGeometryTopologyRepair(
     };
 
     if (is_uturn_geom) {
-        // ── U-turn multi-constraint repair.
-        //
-        // 新方法: 从约束邻居构造采样兄弟向量, 然后调用
+        // ── U-turn 多约束: 从约束邻居构造采样兄弟向量, 然后调用
         // solveUTurnMultiConstraint 搜索更丰富的网格(~600候选),
-        // 联合代价显式权衡G1、最大曲率、同簇交叉、障碍物穿透、
-        // 围栏越界与拱弧质量。
+        // 联合代价显式权衡G1、最大曲率、同簇交叉、障碍物穿透、围栏越界与拱弧质量。
         std::vector<SampledSiblingCurve> repair_sibs;
         auto nit = neighbors.find(conn.id);
         if (nit != neighbors.end()) {
@@ -1613,8 +1610,7 @@ static bool tryPureGeometryTopologyRepair(
             }
         }
         // 若多约束求解器未能达到零交叉, 回退到通用 ref_perp 扫描 ——
-        // 该扫描采用不同
-        // 候选生成(基于 ref_perp 投影), 可能找到不同解。
+        // 该扫描采用不同候选生成(基于 ref_perp 投影), 可能找到不同解。
     } else {
         for (double alpha : {0.10, 0.12, 0.14, 0.16, 0.18, 0.22, 0.26, 0.30, 0.34, 0.38, 0.42, 0.46}) {
             BezierCurve candidate;
@@ -1631,8 +1627,7 @@ static bool tryPureGeometryTopologyRepair(
         double chord_len = chord.norm();
         if (is_uturn_geom) {
             // U型调头横向偏移扫描: 沿前向轴的法向平移顶点。
-            // ref_perp 为簇横向参考; 投影到U型调头横向方向
-            // 得到 lateral_bias 的有符号幅度。
+            // ref_perp 为簇横向参考; 投影到U型调头横向方向得到 lateral_bias 的有符号幅度。
             Vec2d axis = (T0 - T1).normalized();
             if (axis.norm() > 1e-8) {
                 Vec2d lat_dir{-axis[1], axis[0]};
@@ -1846,15 +1841,13 @@ static BezierCurve buildAlignedUTurn(
 
 // ── Crosswalk-aware U-turn start delay ─────────────────────────────────────
 //
-// 新需求: 如果数据中调头连接开始位置附近能搜到人行横道就必须要向
-// 路口内跨越过人行横道后才能调头。
+// 新需求: 如果数据中调头连接开始位置附近能搜到人行横道就必须要向路口内跨越过人行横道后才能调头。
 //
 // 本例程检查人行横道(当数据无人行横道时用停止线作为代理
 // 数据集仅提供stop_lines因人行横道带位于停止线后方)。对每个候选:
 //   1. 计算折线沿 T0 方向距 p0 的最近点。
 //   2. 将位移(nearest - p0)投影到 T0; 若投影为正
-//      (人行横道在 p0 沿进入方向的"前方")且在合理搜索半径内(默认8m),
-//      则为候选。
+//      (人行横道在 p0 沿进入方向的"前方")且在合理搜索半径内(默认8m), 则为候选。
 //   3. 返回所有候选中"远边"投影的最大值 —— 即车辆从 p0 必须前行多远
 //      才能开始拱弧。零表示未找到人行横道, 不施加约束。
 //
@@ -2658,6 +2651,7 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
     cc.entry_lane_id = conn.entry_lane_id;
     cc.exit_lane_id = conn.exit_lane_id;
     cc.turn_type = conn.turn_type;
+    cc.fixed_shape = conn.fixed_shape;
 
     auto _entry = input.entryPtDir(conn.entry_lane_id);
     Vec2d p0 = _entry.first;

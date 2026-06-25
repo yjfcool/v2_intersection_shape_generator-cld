@@ -40,7 +40,7 @@ target_compile_options(intersection_gen_lib PRIVATE
 # - Release: -O3 -DNDEBUG
 # - RelWithDebInfo: -O2 -g -DNDEBUG
 target_compile_options(intersection_gen_lib PRIVATE
-        $<$<CONFIG:Debug>:-g -Og>
+        $<$<CONFIG:Debug>:-g -Og -DNDEBUG>
         $<$<CONFIG:Release>:-O3 -DNDEBUG>
         $<$<CONFIG:RelWithDebInfo>:-O2 -g -DNDEBUG>
 )

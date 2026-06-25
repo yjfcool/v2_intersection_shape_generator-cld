@@ -136,6 +136,8 @@ enum class GroupRole { Entry, Exit };
 /// 转向类型（按几何方位计算优先，输入数据的turn_type不一定可信）
 enum class ConnTurnType { Unknown = 0, TurnLeft = 1, UTurnLeft = 2, Straight = 3, TurnRight = 4, UTurnRight = 5 };
 
+enum class ConnLaneType { Motorway = 0, NonMotorway = 1 };
+
 /// 车道边线：车道左右侧边界线，可被相邻车道共享
 struct LaneEdge {
     LaneEdgeId id;
@@ -178,10 +180,10 @@ struct Connectivity {
     LaneGroupId enterGroupId;
     LaneGroupId exitGroupId;
 
-    LineString2d geometry;  ///< 固有形态（可选）：通常为已生成好的特定形态曲线
-                            ///  非空（坐标数>=2）时除穿障必须避障可重新生成外，
-                            ///  其他场景不能修改固有形态；同簇非交约束和避障时
-                            ///  都需要额外考虑此固有形态影响
+    LineString2d geometry;  ///< 固有形态（可选）：通常为已生成好的特定形态曲线非空（坐标数>=2）时除穿障必须避障可重新生成外，
+                            ///  其他场景不能修改固有形态；同簇非交约束和避障时都需要额外考虑此固有形态影响
+    ConnLaneType lane_type = ConnLaneType::Motorway;
+    bool fixed_shape = false;
 };
 
 /// 障碍物（带缓冲多边形）
@@ -246,6 +248,8 @@ struct ConnectivityCurve {
 
     LaneEdgeId left_edge_id = "";
     LaneEdgeId right_edge_id = "";
+    ConnLaneType lane_type = ConnLaneType::Motorway;
+    bool fixed_shape = false;
 };
 
 /// 连通车道边线：可被相邻连通曲线共享

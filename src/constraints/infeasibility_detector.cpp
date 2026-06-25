@@ -151,6 +151,7 @@ ConnectivityCurve makeFallbackCurve(const PreCheckResult& pre, const Connectivit
     out.exit_lane_id = conn.exit_lane_id;
     out.turn_type = conn.turn_type;
     out.violation.type = pre.type;
+    out.fixed_shape = conn.fixed_shape;
     if (pre.type == ViolationInfo::InfeasibilityType::TopologicalBlock) {
         out.curve = nullptr;
         out.status = CurveStatus::Infeasible;

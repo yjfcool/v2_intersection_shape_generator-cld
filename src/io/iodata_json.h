@@ -299,6 +299,8 @@ inline nlohmann::json connectivityToJson(const Connectivity& conn) {
     j["turn_type"] = static_cast<int>(conn.turn_type);
     j["enterGroupId"] = conn.enterGroupId;
     j["exitGroupId"] = conn.exitGroupId;
+    j["lane_type"] = static_cast<int>(conn.lane_type);
+    j["fixed_shape"] = (conn.fixed_shape ? 1 : 0);
     if (!conn.geometry.points.empty()) {
         j["geometry"] = lineString2dToJson(conn.geometry);
     }
@@ -325,6 +327,12 @@ inline Connectivity connectivityFromJson(const nlohmann::json& j) {
     }
     if (j.contains("exitGroupId")) {
         conn.exitGroupId = j["exitGroupId"].get<std::string>();
+    }
+    if (j.contains("lane_type")) {
+        conn.lane_type = static_cast<ConnLaneType>(j["lane_type"].get<int>());
+    }
+    if (j.contains("fixed_shape")) {
+        conn.fixed_shape = j["fixed_shape"].get<int>();
     }
     if (j.contains("geometry")) {
         conn.geometry = lineString2dFromJson(j["geometry"]);
@@ -517,6 +525,8 @@ inline nlohmann::json connectivityCurveToJson(const ConnectivityCurve& cc) {
     j["entry_lane_id"] = cc.entry_lane_id;
     j["exit_lane_id"] = cc.exit_lane_id;
     j["turn_type"] = static_cast<int>(cc.turn_type);
+    j["lane_type"] = static_cast<int>(cc.lane_type);
+    j["fixed_shape"] = (cc.fixed_shape ? 1 : 0);
     LineString2d geometry = cc.geometry;
     if (geometry.points.empty() && cc.curve) {
         int n = std::max(2, std::min(240, (int)std::ceil(cc.curve->arcLength() / 0.3) + 1));
@@ -549,6 +559,9 @@ inline ConnectivityCurve connectivityCurveFromJson(const nlohmann::json& j) {
     }
     if (j.contains("geometry")) {
         cc.geometry = lineString2dFromJson(j["geometry"]);
+    }
+    if (j.contains("fixed_shape")) {
+        cc.fixed_shape = j["fixed_shape"].get<int>();
     }
     if (j.contains("status")) {
         cc.status = static_cast<CurveStatus>(j["status"].get<int>());
