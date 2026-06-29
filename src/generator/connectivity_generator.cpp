@@ -1038,11 +1038,11 @@ static void annotateClusterCrossings(
     std::unordered_map<ConnId, SampledCurve> samples;
     samples.reserve(results.size());
     // 性能优化: 采样数从48降至24(Debug进一步降至16)
-#ifdef NDEBUG
+// #ifdef NDEBUG
     const int N_ANNOTATE = 24;
-#else
-    const int N_ANNOTATE = 16;
-#endif
+// #else
+//     const int N_ANNOTATE = 16;
+// #endif
     for (const auto& cc : results)
         if (cc.curve)
             samples.emplace(cc.id, sampleCurveForIntersections(*cc.curve, N_ANNOTATE));
@@ -1271,11 +1271,11 @@ static bool tryShapeSafeSingleCubic(
     bool improved = false;
 
     // 性能优化: alpha扫描从9个降至4个(Debug进一步降至2个)
-#ifdef NDEBUG
+// #ifdef NDEBUG
     std::vector<double> alphas = {0.18, 0.26, 0.34, 0.42};
-#else
-    std::vector<double> alphas = {0.26, 0.38};
-#endif
+// #else
+//     std::vector<double> alphas = {0.26, 0.38};
+// #endif
     for (double alpha : alphas) {
         BezierCurve candidate;
         candidate.segs.push_back(makeCubicG1(p0, T0, p1, T1, alpha));
@@ -2166,11 +2166,11 @@ static UTurnSolverResult solveUTurnMultiConstraint(
     std::vector<double> handle_biases;
 
     scales = {0.7, 1.0};  // 性能优化: 从4个scale降至2个
-#ifdef NDEBUG
+// #ifdef NDEBUG
     const bool dbg_small_grid = false;
-#else
-    const bool dbg_small_grid = true;  // Debug模式进一步缩减
-#endif
+// #else
+//     const bool dbg_small_grid = true;  // Debug模式进一步缩减
+// #endif
     if (turn_gap < 1.5) {
         lat_biases = {0.0};
         lead0_extras = {0.0};
@@ -2920,11 +2920,11 @@ ConnectivityCurve ConnectivityGenerator::generateOne(
             }
         }
         // 性能优化: alpha扫描从6个降至3个(Debug进一步降至2个)
-#ifdef NDEBUG
+// #ifdef NDEBUG
         std::vector<double> try_alphas = {0.38, 0.30, 0.24};
-#else
-        std::vector<double> try_alphas = {0.38, 0.26};
-#endif
+// #else
+//         std::vector<double> try_alphas = {0.38, 0.26};
+// #endif
         int best_cross = sampledSiblingCrossCount(initial, ensure_sampled_siblings(), true, 1.5);
         BezierCurve best_curve = initial;
         double best_alpha = 0.4;
@@ -3254,11 +3254,11 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
         auto result_idx = resultIndexById(results);
         auto neighbors = constrainedNeighborMap(results, cluster_solver_);
         // 性能优化: 修复轮次从2降至1(Debug模式跳过)
-#ifdef NDEBUG
+// #ifdef NDEBUG
         const int max_pure_passes = 1;  // 性能优化: 2→1
-#else
-        const int max_pure_passes = 0;  // Debug模式: 跳过pure_geometry修复
-#endif
+// #else
+//         const int max_pure_passes = 0;  // Debug模式: 跳过pure_geometry修复
+// #endif
         for (int pass = 0; pass < max_pure_passes; ++pass) {
             auto repair_ids = collectPureGeometryRepairIds(
                 results, cluster_solver_, preserved_fixed_ids, 1.5);
@@ -3311,13 +3311,13 @@ std::vector<ConnectivityCurve> ConnectivityGenerator::generate(
     std::unordered_map<ConnId, BezierCurve> all_done = curveMapFromResults(results);
     // 性能优化: 修复轮次从3降至2,每轮最多6条(原12)
     // Debug模式进一步优化: 仅1轮,最多3条
-#ifdef NDEBUG
+// #ifdef NDEBUG
     const int max_repair_passes = 2;
     const int max_repairs_per_pass = 6;
-#else
-    const int max_repair_passes = 1;
-    const int max_repairs_per_pass = 3;
-#endif
+// #else
+//     const int max_repair_passes = 1;
+//     const int max_repairs_per_pass = 3;
+// #endif
     for (int repair_pass = 0; repair_pass < max_repair_passes; ++repair_pass) {
         result_idx = resultIndexById(results);
         all_done = curveMapFromResults(results);

@@ -196,7 +196,7 @@ struct Obstacle {
 struct Boundary {
     enum class Type { RoadEdge, MedianStrip, GreenBelt, Other };
     std::string id;
-    Type type = Type::RoadEdge;
+    Type type = Type::Other;
     LineString2d geometry;
 };
 

@@ -113,11 +113,11 @@ double PenaltyCost::evalCluster(const BezierCurve& c) const {
     constexpr double MAX_DIST = 8.0;        // 米 — 最近点搜索半径(从12降至8)
     constexpr double MAX_DIST2 = MAX_DIST * MAX_DIST;
     constexpr double SKIP_FRAC = 0.07;      // 跳过首尾7%
-#ifdef NDEBUG
+// #ifdef NDEBUG
     constexpr int N_SAMP = 32;              // 采样点数(从48降至32,性能优化)
-#else
-    constexpr int N_SAMP = 16;              // Debug模式进一步降低
-#endif
+// #else
+//     constexpr int N_SAMP = 16;              // Debug模式进一步降低
+// #endif
 
     auto curve_pts = c.sampleByArcLength(N_SAMP);
     int N = (int) curve_pts.size();
@@ -406,14 +406,14 @@ void PenaltyCost::addNumericGrad(
     BezierCurve c0 = full_param_mode ? curveFromParamsFull(params, proto) : curveFromParams(params, proto);
     bool nb = (wb > 1e-6 && evalBoundary(c0) > 1e-9);
     bool nf = (wf > 1e-6 && evalFence(c0) > 1e-9);
-#ifdef NDEBUG
+// #ifdef NDEBUG
     bool nc = (wc > 1e-6 && evalCluster(c0) > 1e-9);
-#else
-    // Debug模式: 跳过cluster数值梯度(单次evalCluster在Debug下很慢),
-    // 仅依赖smooth+obstacle梯度推动优化
-    bool nc = false;
-    (void)wc;
-#endif
+// #else
+//     // Debug模式: 跳过cluster数值梯度(单次evalCluster在Debug下很慢),
+//     // 仅依赖smooth+obstacle梯度推动优化
+//     bool nc = false;
+//     (void)wc;
+// #endif
     bool nx = (wx > 1e-6 && evalCrosswalk(c0) > 1e-9);
     if (!nb && !nf && !nc && !nx)return;
     const double h = 1e-4;
